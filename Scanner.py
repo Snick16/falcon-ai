@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 BOOSTS_URL = "https://api.dexscreener.com/token-boosts/latest/v1"
 TOKEN_URL = "https://api.dexscreener.com/tokens/v1/solana/{}"
+REQUIRED_TOKEN_KEYS = ("signal", "momentum", "confidence", "risk_label")
 
 
 def safe_number(value):
@@ -198,24 +199,84 @@ def classify_momentum(price_5m, buys_5m, sells_5m):
     return "NEUTRAL"
 
 
-def classify_signal(score, price_5m, liquidity, volume_5m):
-    """Classify trade readiness as BUY, WATCH, or PASS."""
-    buy_requirements = [
-        score >= 70,
-        price_5m > 0,
-        liquidity >= 25_000,
-        volume_5m >= 5_000,
+def classify_signal(
+    score,
+    confidence,
+    momentum,
+    risk_label,
+    liquidity,
+    volume_5m,
+    buys_5m,
+    sells_5m,
+):
+    """Classify trade readiness via weighted checklist with minimum hit counts."""
+    total_txns_5m = buys_5m + sells_5m
+    buy_pressure = buys_5m >= sells_5m
+    strong_buy_pressure = buys_5m >= sells_5m * 1.1 and buys_5m >= 10
+
+    if liquidity < 10_000:
+        return "PASS", ["liquidity too low"]
+    if volume_5m < 500:
+        return "PASS", ["5-minute volume too low"]
+    if sells_5m > buys_5m * 1.35 and sells_5m >= 12:
+        return "PASS", ["sell pressure dominates buys"]
+    if risk_label == "HIGH" and momentum == "BEARISH":
+        return "PASS", ["high risk with bearish momentum"]
+
+    checks = [
+        ("score>=55", score >= 55, 3),
+        ("confidence>=60", confidence >= 60, 3),
+        ("momentum bullish", momentum == "BULLISH", 2),
+        ("risk not high", risk_label in ("LOW", "MEDIUM"), 2),
+        ("liquidity>=25k", liquidity >= 25_000, 1),
+        ("volume5m>=5k", volume_5m >= 5_000, 1),
+        ("buys>=sells", buy_pressure, 1),
+        ("strong buy pressure", strong_buy_pressure, 1),
+        ("txn activity>=10", total_txns_5m >= 10, 1),
     ]
 
-    if all(buy_requirements):
-        return "BUY"
+    passed_checks = [name for name, ok, _ in checks if ok]
+    failed_checks = [name for name, ok, _ in checks if not ok]
+    weighted_score = sum(weight for _, ok, weight in checks if ok)
+    passed_count = len(passed_checks)
 
-    non_score_requirements = buy_requirements[1:]
-    missing_non_score = sum(1 for passed in non_score_requirements if not passed)
-    if 50 <= score <= 69 or (score >= 70 and missing_non_score == 1):
-        return "WATCH"
+    core_checks = [
+        score >= 55,
+        confidence >= 60,
+        momentum == "BULLISH",
+        risk_label in ("LOW", "MEDIUM"),
+    ]
+    core_hits = sum(1 for ok in core_checks if ok)
 
-    return "PASS"
+    # BUY requires a strong combination, not necessarily every condition.
+    # Thresholds: weighted>=11, at least 6 checks passed, and at least 3 core hits.
+    if weighted_score >= 11 and passed_count >= 6 and core_hits >= 3:
+        reasons = [
+            "weighted strength is high",
+            f"{passed_count} checklist conditions satisfied",
+            f"{core_hits}/4 core conditions satisfied",
+        ]
+        return "BUY", reasons
+
+    # WATCH captures near-BUY setups with decent combined strength.
+    # Path A: weighted>=7, at least 4 checks, at least 2 core hits, no high-risk bearish state.
+    # Path B: weighted>=6 with bullish momentum and risk not high.
+    watch_path_a = weighted_score >= 7 and passed_count >= 4 and core_hits >= 2
+    watch_path_b = weighted_score >= 6 and momentum == "BULLISH" and risk_label != "HIGH"
+    if watch_path_a or watch_path_b:
+        reasons = [
+            "near-BUY weighted checklist",
+            f"{passed_count} checklist conditions satisfied",
+            "missing: " + ", ".join(failed_checks[:2]) if failed_checks else "minor gaps only",
+        ]
+        return "WATCH", reasons
+
+    reasons = [
+        "insufficient combined checklist strength",
+        f"{passed_count} checklist conditions satisfied",
+        "missing: " + ", ".join(failed_checks[:2]) if failed_checks else "multiple weaknesses",
+    ]
+    return "PASS", reasons
 
 
 def calculate_confidence(score, liquidity, volume_5m, buys_5m, sells_5m, momentum):
@@ -258,6 +319,27 @@ def calculate_confidence(score, liquidity, volume_5m, buys_5m, sells_5m, momentu
         confidence += 5
 
     return int(max(0, min(round(confidence), 100)))
+
+
+def normalize_token_shape(token):
+    """Ensure required trade-readiness fields exist with safe default types."""
+    normalized = dict(token)
+    normalized["signal"] = str(normalized.get("signal", "PASS") or "PASS")
+    normalized["momentum"] = str(normalized.get("momentum", "NEUTRAL") or "NEUTRAL")
+    normalized["risk_label"] = str(normalized.get("risk_label", "MEDIUM") or "MEDIUM")
+
+    confidence = normalized.get("confidence", 0)
+    try:
+        confidence = int(confidence)
+    except (TypeError, ValueError):
+        confidence = 0
+    normalized["confidence"] = max(0, min(confidence, 100))
+
+    for key in REQUIRED_TOKEN_KEYS:
+        if key not in normalized:
+            raise KeyError(f"Missing required token key: {key}")
+
+    return normalized
 
 
 def get_best_pair(pairs):
@@ -337,7 +419,6 @@ def scan_tokens(max_tokens=30, top_n=15):
             sells_5m = int(txns_5m.get("sells", 0) or 0)
 
             momentum = classify_momentum(price_change_5m_pct, buys_5m, sells_5m)
-            signal = classify_signal(score, price_change_5m_pct, liquidity_usd, volume_5m_usd)
             confidence = calculate_confidence(
                 score,
                 liquidity_usd,
@@ -346,31 +427,49 @@ def scan_tokens(max_tokens=30, top_n=15):
                 sells_5m,
                 momentum,
             )
+            signal, signal_reasons = classify_signal(
+                score=score,
+                confidence=confidence,
+                momentum=momentum,
+                risk_label=risk_label,
+                liquidity=liquidity_usd,
+                volume_5m=volume_5m_usd,
+                buys_5m=buys_5m,
+                sells_5m=sells_5m,
+            )
 
             opportunities.append(
-                {
-                    "score": score,
-                    "risk_label": risk_label,
-                    "signal": signal,
-                    "momentum": momentum,
-                    "confidence": confidence,
-                    "reasons": reasons,
-                    "token_name": base.get("name", "Unknown"),
-                    "token_symbol": base.get("symbol", "UNKNOWN"),
-                    "contract_address": base.get("address", "N/A"),
-                    "market_cap_usd": safe_number(pair.get("marketCap") or pair.get("fdv")),
-                    "liquidity_usd": liquidity_usd,
-                    "volume_5m_usd": volume_5m_usd,
-                    "price_change_5m_pct": price_change_5m_pct,
-                    "buys_5m": buys_5m,
-                    "sells_5m": sells_5m,
-                    "dexscreener_url": pair.get("url", ""),
-                    "boost_amount": boost_amounts.get(address, 0),
-                }
+                normalize_token_shape(
+                    {
+                        "score": score,
+                        "risk_label": risk_label,
+                        "signal": signal,
+                        "signal_reasons": signal_reasons,
+                        "momentum": momentum,
+                        "confidence": confidence,
+                        "reasons": reasons,
+                        "token_name": base.get("name", "Unknown"),
+                        "token_symbol": base.get("symbol", "UNKNOWN"),
+                        "contract_address": base.get("address", "N/A"),
+                        "market_cap_usd": safe_number(pair.get("marketCap") or pair.get("fdv")),
+                        "liquidity_usd": liquidity_usd,
+                        "volume_5m_usd": volume_5m_usd,
+                        "price_change_5m_pct": price_change_5m_pct,
+                        "buys_5m": buys_5m,
+                        "sells_5m": sells_5m,
+                        "dexscreener_url": pair.get("url", ""),
+                        "boost_amount": boost_amounts.get(address, 0),
+                    }
+                )
             )
 
         opportunities.sort(key=lambda item: item["score"], reverse=True)
         top_tokens = opportunities[:top_n]
+
+        top_tokens = [normalize_token_shape(token) for token in top_tokens]
+
+        if top_tokens:
+            print(top_tokens[0])
 
         return {
             "ok": True,
@@ -425,6 +524,10 @@ def main():
             "Trade:       "
             f"{token.get('signal', 'PASS')} | {token.get('momentum', 'NEUTRAL')} | "
             f"Confidence {token.get('confidence', 0)}"
+        )
+        print(
+            "Decision:    "
+            + (", ".join(token.get("signal_reasons", [])) or "No decision reasons")
         )
         print(f"Risk:        {token.get('risk_label', 'MEDIUM')}")
         print(f"Liquidity:   ${token.get('liquidity_usd', 0):,.0f}")

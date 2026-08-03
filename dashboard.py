@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timezone
+import html
 from Scanner import scan_tokens
 
 st.set_page_config(
@@ -13,11 +14,35 @@ st.title("🦅 FALCON")
 st.subheader("AI Market Intelligence")
 st.divider()
 
+REQUIRED_TOKEN_FIELDS = ("signal", "momentum", "confidence", "risk_label")
+
 
 def load_scan(force_refresh=False):
     if force_refresh or "scan_payload" not in st.session_state:
         st.session_state.scan_payload = scan_tokens()
-    return st.session_state.scan_payload
+
+    payload = st.session_state.scan_payload
+    if payload_needs_refresh(payload):
+        payload = scan_tokens()
+        st.session_state.scan_payload = payload
+
+    return payload
+
+
+def payload_needs_refresh(payload):
+    """Refresh once if cached payload predates trade-readiness fields."""
+    if not payload or not payload.get("ok"):
+        return False
+
+    tokens = payload.get("tokens", [])
+    if not tokens:
+        return False
+
+    for token in tokens:
+        for field in REQUIRED_TOKEN_FIELDS:
+            if field not in token:
+                return True
+    return False
 
 
 def format_scan_time(iso_value):
@@ -49,6 +74,28 @@ def style_momentum(value):
         "BEARISH": "color: #b22222; font-weight: 700;",
     }
     return styles.get(str(value), "")
+
+
+def style_risk(value):
+    styles = {
+        "LOW": "background-color: #1f7a1f; color: white; font-weight: 700;",
+        "MEDIUM": "background-color: #d4a017; color: black; font-weight: 700;",
+        "HIGH": "background-color: #b22222; color: white; font-weight: 700;",
+    }
+    return styles.get(str(value), "")
+
+
+def style_falcon_score(value):
+    try:
+        score = int(value)
+    except (TypeError, ValueError):
+        return ""
+
+    if score >= 70:
+        return "background-color: #1f7a1f; color: white; font-weight: 700;"
+    if score >= 40:
+        return "background-color: #d4a017; color: black; font-weight: 700;"
+    return "background-color: #b22222; color: white; font-weight: 700;"
 
 
 refresh_clicked = st.button("Refresh Scan", type="primary")
@@ -87,15 +134,43 @@ else:
     if not tokens:
         st.info("No opportunities found in the latest scan.")
     else:
+        signal_filter = st.selectbox(
+            "Signal Filter",
+            options=["ALL", "BUY", "WATCH", "PASS"],
+            index=0,
+        )
+
+        filtered_tokens = tokens
+        if signal_filter != "ALL":
+            filtered_tokens = [
+                token for token in tokens
+                if str(token.get("signal", "MISSING")).upper() == signal_filter
+            ]
+
+        filtered_tokens = sorted(
+            filtered_tokens,
+            key=lambda token: int(token.get("score", 0)),
+            reverse=True,
+        )
+
+        if not filtered_tokens:
+            st.info("No opportunities match the selected signal filter.")
+            st.stop()
+
         rows = []
-        for token in tokens:
+        for token in filtered_tokens:
+            chart_url = str(token.get("dexscreener_url", "") or "")
+            chart_link = (
+                f'<a href="{html.escape(chart_url)}" target="_blank">Open Chart</a>'
+                if chart_url else ""
+            )
             rows.append(
                 {
-                    "Signal": token.get("signal", "PASS"),
-                    "Momentum": token.get("momentum", "NEUTRAL"),
+                    "Signal": token.get("signal", "MISSING"),
+                    "Momentum": token.get("momentum", "MISSING"),
                     "Confidence": int(token.get("confidence", 0)),
-                    "Falcon Score": token.get("score", 0),
-                    "Risk": token.get("risk_label", "MEDIUM"),
+                    "Falcon Score": int(token.get("score", 0)),
+                    "Risk": token.get("risk_label", "MISSING"),
                     "Token": f"{token.get('token_name', 'Unknown')} ({token.get('token_symbol', 'UNKNOWN')})",
                     "Contract Address": token.get("contract_address", "N/A"),
                     "Market Cap (USD)": f"${token.get('market_cap_usd', 0):,.0f}",
@@ -104,10 +179,23 @@ else:
                     "5m Price Change": f"{token.get('price_change_5m_pct', 0):+.2f}%",
                     "Buys/Sells (5m)": f"{token.get('buys_5m', 0)}/{token.get('sells_5m', 0)}",
                     "Reasons": ", ".join(token.get("reasons", [])) or "No strong signals",
-                    "DexScreener": token.get("dexscreener_url", ""),
+                    "DexScreener": chart_link,
                 }
             )
 
         table_df = pd.DataFrame(rows)
-        styled_table = table_df.style.map(style_signal, subset=["Signal"]).map(style_momentum, subset=["Momentum"])
-        st.dataframe(styled_table, use_container_width=True, hide_index=True)
+        styled_table = (
+            table_df.style
+            .map(style_signal, subset=["Signal"])
+            .map(style_momentum, subset=["Momentum"])
+            .map(style_risk, subset=["Risk"])
+            .map(style_falcon_score, subset=["Falcon Score"])
+            .set_properties(**{"text-align": "left"})
+            .set_table_styles(
+                [
+                    {"selector": "th", "props": [("text-align", "left")]},
+                    {"selector": "td", "props": [("padding", "6px 10px")]},
+                ]
+            )
+        )
+        st.markdown(styled_table.to_html(escape=False), unsafe_allow_html=True)
