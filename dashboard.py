@@ -98,6 +98,64 @@ def style_falcon_score(value):
     return "background-color: #b22222; color: white; font-weight: 700;"
 
 
+def format_delta(value):
+    if value == "NEW":
+        return "NEW"
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number > 0:
+        return f"+{number}"
+    return str(number)
+
+
+def style_delta(value):
+    if value == "NEW":
+        return "background-color: #e6f7ff; color: #005a9e; font-weight: 700;"
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if number > 0:
+        return "background-color: #e7f6e7; color: #136c13; font-weight: 700;"
+    if number < 0:
+        return "background-color: #fdeaea; color: #8b1e1e; font-weight: 700;"
+    return ""
+
+
+def style_signal_change(value):
+    if value == "NEW":
+        return "background-color: #e6f7ff; color: #005a9e; font-weight: 700;"
+    if value == "UNCHANGED":
+        return ""
+    ranks = {"PASS": 0, "WATCH": 1, "BUY": 2}
+    if "->" not in str(value):
+        return ""
+    left, right = [part.strip() for part in str(value).split("->", 1)]
+    if ranks.get(right, 0) > ranks.get(left, 0):
+        return "background-color: #e7f6e7; color: #136c13; font-weight: 700;"
+    if ranks.get(right, 0) < ranks.get(left, 0):
+        return "background-color: #fdeaea; color: #8b1e1e; font-weight: 700;"
+    return ""
+
+
+def style_momentum_change(value):
+    if value == "NEW":
+        return "background-color: #e6f7ff; color: #005a9e; font-weight: 700;"
+    if value == "UNCHANGED":
+        return ""
+    ranks = {"BEARISH": 0, "NEUTRAL": 1, "BULLISH": 2}
+    if "->" not in str(value):
+        return ""
+    left, right = [part.strip() for part in str(value).split("->", 1)]
+    if ranks.get(right, 0) > ranks.get(left, 0):
+        return "background-color: #e7f6e7; color: #136c13; font-weight: 700;"
+    if ranks.get(right, 0) < ranks.get(left, 0):
+        return "background-color: #fdeaea; color: #8b1e1e; font-weight: 700;"
+    return ""
+
+
 refresh_clicked = st.button("Refresh Scan", type="primary")
 payload = load_scan(force_refresh=refresh_clicked)
 
@@ -166,6 +224,10 @@ else:
             )
             rows.append(
                 {
+                    "Score Δ": format_delta(token.get("score_delta", "NEW")),
+                    "Confidence Δ": format_delta(token.get("confidence_delta", "NEW")),
+                    "Signal Change": token.get("signal_change", "NEW"),
+                    "Momentum Change": token.get("momentum_change", "NEW"),
                     "Signal": token.get("signal", "MISSING"),
                     "Momentum": token.get("momentum", "MISSING"),
                     "Confidence": int(token.get("confidence", 0)),
@@ -186,6 +248,10 @@ else:
         table_df = pd.DataFrame(rows)
         styled_table = (
             table_df.style
+            .map(style_delta, subset=["Score Δ"])
+            .map(style_delta, subset=["Confidence Δ"])
+            .map(style_signal_change, subset=["Signal Change"])
+            .map(style_momentum_change, subset=["Momentum Change"])
             .map(style_signal, subset=["Signal"])
             .map(style_momentum, subset=["Momentum"])
             .map(style_risk, subset=["Risk"])

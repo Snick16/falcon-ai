@@ -1,9 +1,15 @@
 import requests
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 BOOSTS_URL = "https://api.dexscreener.com/token-boosts/latest/v1"
 TOKEN_URL = "https://api.dexscreener.com/tokens/v1/solana/{}"
 REQUIRED_TOKEN_KEYS = ("signal", "momentum", "confidence", "risk_label")
+MEMORY_DIR = Path(__file__).resolve().parent / ".falcon_memory"
+SNAPSHOTS_DIR = MEMORY_DIR / "snapshots"
+DISAPPEARED_HISTORY_FILE = MEMORY_DIR / "disappeared_history.jsonl"
+MAX_SNAPSHOTS = 500
 
 
 def safe_number(value):
@@ -12,6 +18,150 @@ def safe_number(value):
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def ensure_memory_dirs():
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_latest_snapshot():
+    """Load the latest scan snapshot if one exists."""
+    ensure_memory_dirs()
+    snapshot_files = sorted(SNAPSHOTS_DIR.glob("*.json"))
+    if not snapshot_files:
+        return None
+    latest_path = snapshot_files[-1]
+    try:
+        with latest_path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def prune_snapshots():
+    """Keep only the newest MAX_SNAPSHOTS snapshot files."""
+    snapshot_files = sorted(SNAPSHOTS_DIR.glob("*.json"))
+    if len(snapshot_files) <= MAX_SNAPSHOTS:
+        return
+    for old_path in snapshot_files[:-MAX_SNAPSHOTS]:
+        try:
+            old_path.unlink()
+        except OSError:
+            pass
+
+
+def save_snapshot(scanned_at, tokens):
+    """Persist the completed scan as local JSON snapshot."""
+    ensure_memory_dirs()
+    safe_name = scanned_at.replace(":", "-").replace(".", "-")
+    snapshot_path = SNAPSHOTS_DIR / f"{safe_name}.json"
+    payload = {
+        "scanned_at": scanned_at,
+        "token_count": len(tokens),
+        "tokens": tokens,
+    }
+    with snapshot_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=True)
+    prune_snapshots()
+
+
+def record_disappeared_tokens(previous_tokens, current_tokens, scanned_at):
+    """Append tokens missing from current scan to history."""
+    if not previous_tokens:
+        return
+
+    previous_by_contract = {
+        token.get("contract_address"): token
+        for token in previous_tokens
+        if token.get("contract_address")
+    }
+    current_contracts = {
+        token.get("contract_address")
+        for token in current_tokens
+        if token.get("contract_address")
+    }
+
+    disappeared = [
+        token
+        for contract, token in previous_by_contract.items()
+        if contract not in current_contracts
+    ]
+    if not disappeared:
+        return
+
+    ensure_memory_dirs()
+    with DISAPPEARED_HISTORY_FILE.open("a", encoding="utf-8") as handle:
+        for token in disappeared:
+            record = {
+                "scanned_at": scanned_at,
+                "contract_address": token.get("contract_address"),
+                "token_name": token.get("token_name"),
+                "token_symbol": token.get("token_symbol"),
+                "last_signal": token.get("signal"),
+                "last_score": token.get("score"),
+                "last_confidence": token.get("confidence"),
+                "last_momentum": token.get("momentum"),
+                "last_risk": token.get("risk_label"),
+            }
+            handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+
+
+def build_memory_delta(current_token, previous_token):
+    """Build scan-over-scan comparison fields for Falcon Memory."""
+    if previous_token is None:
+        return {
+            "score_delta": "NEW",
+            "confidence_delta": "NEW",
+            "signal_change": "NEW",
+            "momentum_change": "NEW",
+            "risk_change": "NEW",
+            "liquidity_delta": "NEW",
+            "volume_5m_delta": "NEW",
+            "market_cap_delta": "NEW",
+        }
+
+    current_score = int(current_token.get("score", 0))
+    previous_score = int(previous_token.get("score", 0))
+    current_conf = int(current_token.get("confidence", 0))
+    previous_conf = int(previous_token.get("confidence", 0))
+
+    current_signal = str(current_token.get("signal", "PASS"))
+    previous_signal = str(previous_token.get("signal", "PASS"))
+    current_momentum = str(current_token.get("momentum", "NEUTRAL"))
+    previous_momentum = str(previous_token.get("momentum", "NEUTRAL"))
+    current_risk = str(current_token.get("risk_label", "MEDIUM"))
+    previous_risk = str(previous_token.get("risk_label", "MEDIUM"))
+
+    current_liquidity = safe_number(current_token.get("liquidity_usd"))
+    previous_liquidity = safe_number(previous_token.get("liquidity_usd"))
+    current_volume = safe_number(current_token.get("volume_5m_usd"))
+    previous_volume = safe_number(previous_token.get("volume_5m_usd"))
+    current_market_cap = safe_number(current_token.get("market_cap_usd"))
+    previous_market_cap = safe_number(previous_token.get("market_cap_usd"))
+
+    return {
+        "score_delta": current_score - previous_score,
+        "confidence_delta": current_conf - previous_conf,
+        "signal_change": (
+            "UNCHANGED"
+            if current_signal == previous_signal
+            else f"{previous_signal} -> {current_signal}"
+        ),
+        "momentum_change": (
+            "UNCHANGED"
+            if current_momentum == previous_momentum
+            else f"{previous_momentum} -> {current_momentum}"
+        ),
+        "risk_change": (
+            "UNCHANGED"
+            if current_risk == previous_risk
+            else f"{previous_risk} -> {current_risk}"
+        ),
+        "liquidity_delta": round(current_liquidity - previous_liquidity, 2),
+        "volume_5m_delta": round(current_volume - previous_volume, 2),
+        "market_cap_delta": round(current_market_cap - previous_market_cap, 2),
+    }
 
 
 def calculate_score(pair):
@@ -356,6 +506,15 @@ def scan_tokens(max_tokens=30, top_n=15):
     This keeps scoring logic unchanged and avoids printing-only output.
     """
     try:
+        scanned_at = datetime.now(timezone.utc).isoformat()
+        previous_snapshot = load_latest_snapshot()
+        previous_tokens = (previous_snapshot or {}).get("tokens", [])
+        previous_by_contract = {
+            token.get("contract_address"): token
+            for token in previous_tokens
+            if token.get("contract_address")
+        }
+
         boost_response = requests.get(BOOSTS_URL, timeout=15, verify=False)
         boost_response.raise_for_status()
         boosts = boost_response.json()
@@ -376,10 +535,12 @@ def scan_tokens(max_tokens=30, top_n=15):
                 break
 
         if not addresses:
+            record_disappeared_tokens(previous_tokens, [], scanned_at)
+            save_snapshot(scanned_at, [])
             return {
                 "ok": True,
                 "error": None,
-                "scanned_at": datetime.now(timezone.utc).isoformat(),
+                "scanned_at": scanned_at,
                 "opportunities_count": 0,
                 "highest_score": 0,
                 "tokens": [],
@@ -438,29 +599,31 @@ def scan_tokens(max_tokens=30, top_n=15):
                 sells_5m=sells_5m,
             )
 
+            current_token = {
+                "score": score,
+                "risk_label": risk_label,
+                "signal": signal,
+                "signal_reasons": signal_reasons,
+                "momentum": momentum,
+                "confidence": confidence,
+                "reasons": reasons,
+                "token_name": base.get("name", "Unknown"),
+                "token_symbol": base.get("symbol", "UNKNOWN"),
+                "contract_address": base.get("address", "N/A"),
+                "market_cap_usd": safe_number(pair.get("marketCap") or pair.get("fdv")),
+                "liquidity_usd": liquidity_usd,
+                "volume_5m_usd": volume_5m_usd,
+                "price_change_5m_pct": price_change_5m_pct,
+                "buys_5m": buys_5m,
+                "sells_5m": sells_5m,
+                "dexscreener_url": pair.get("url", ""),
+                "boost_amount": boost_amounts.get(address, 0),
+            }
+            previous_token = previous_by_contract.get(current_token.get("contract_address"))
+            current_token.update(build_memory_delta(current_token, previous_token))
+
             opportunities.append(
-                normalize_token_shape(
-                    {
-                        "score": score,
-                        "risk_label": risk_label,
-                        "signal": signal,
-                        "signal_reasons": signal_reasons,
-                        "momentum": momentum,
-                        "confidence": confidence,
-                        "reasons": reasons,
-                        "token_name": base.get("name", "Unknown"),
-                        "token_symbol": base.get("symbol", "UNKNOWN"),
-                        "contract_address": base.get("address", "N/A"),
-                        "market_cap_usd": safe_number(pair.get("marketCap") or pair.get("fdv")),
-                        "liquidity_usd": liquidity_usd,
-                        "volume_5m_usd": volume_5m_usd,
-                        "price_change_5m_pct": price_change_5m_pct,
-                        "buys_5m": buys_5m,
-                        "sells_5m": sells_5m,
-                        "dexscreener_url": pair.get("url", ""),
-                        "boost_amount": boost_amounts.get(address, 0),
-                    }
-                )
+                normalize_token_shape(current_token)
             )
 
         opportunities.sort(key=lambda item: item["score"], reverse=True)
@@ -468,13 +631,16 @@ def scan_tokens(max_tokens=30, top_n=15):
 
         top_tokens = [normalize_token_shape(token) for token in top_tokens]
 
+        record_disappeared_tokens(previous_tokens, opportunities, scanned_at)
+        save_snapshot(scanned_at, opportunities)
+
         if top_tokens:
             print(top_tokens[0])
 
         return {
             "ok": True,
             "error": None,
-            "scanned_at": datetime.now(timezone.utc).isoformat(),
+            "scanned_at": scanned_at,
             "opportunities_count": len(top_tokens),
             "highest_score": top_tokens[0]["score"] if top_tokens else 0,
             "tokens": top_tokens,
