@@ -1,1 +1,1 @@
-{"contracts": {"TEST_X": {"last_alert_at": "2026-08-04T03:29:06.218563+00:00"}}}
+{"contracts": {"TEST_X": {"last_alert_at": "2026-08-04T03:29:06.218563+00:00"}, "FORCED_ALERT_CONTRACT_V1": {"last_alert_at": "2026-08-04T06:07:25.527294+00:00", "first_alert_at": "2026-08-04T06:07:25.527294+00:00", "alerted_once": true}}}

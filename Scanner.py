@@ -1093,7 +1093,7 @@ def scan_tokens(max_tokens=30, top_n=15):
                 f"{token.get('contract_address', 'N/A')}"
             )
 
-        alert_report = ALERT_ENGINE.process_scan(top_tokens, scanned_at)
+        alert_report = ALERT_ENGINE.process_scan(opportunities, scanned_at)
         record_disappeared_tokens(previous_tokens, opportunities, scanned_at)
         save_snapshot(scanned_at, opportunities)
 
@@ -1124,6 +1124,7 @@ def scan_tokens(max_tokens=30, top_n=15):
                 "eligible": 0,
                 "sent": 0,
                 "suppressed_by_cooldown": 0,
+                "suppressed_by_contract": 0,
                 "errors": 1,
                 "mode": "error",
             },
@@ -1144,6 +1145,7 @@ def scan_tokens(max_tokens=30, top_n=15):
                 "eligible": 0,
                 "sent": 0,
                 "suppressed_by_cooldown": 0,
+                "suppressed_by_contract": 0,
                 "errors": 1,
                 "mode": "error",
             },

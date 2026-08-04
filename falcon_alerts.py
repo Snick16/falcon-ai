@@ -12,6 +12,35 @@ import requests
 MEMORY_DIR = Path(__file__).resolve().parent / ".falcon_memory"
 ALERT_STATE_FILE = MEMORY_DIR / "alert_state.json"
 TELEGRAM_SEND_URL = "https://api.telegram.org/bot{token}/sendMessage"
+ENV_FILE = Path(__file__).resolve().parent / ".env"
+
+
+def _load_env_file_values() -> Dict[str, str]:
+    values: Dict[str, str] = {}
+    if not ENV_FILE.exists():
+        return values
+    try:
+        with ENV_FILE.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, raw_value = line.split("=", 1)
+                values[key.strip()] = raw_value.strip().strip('"').strip("'")
+    except OSError:
+        return {}
+    return values
+
+
+def _get_setting(name: str, default: str = "") -> str:
+    env_value = os.getenv(name)
+    if env_value is not None and str(env_value).strip() != "":
+        return str(env_value).strip()
+    file_values = _load_env_file_values()
+    value = file_values.get(name)
+    if value is not None and str(value).strip() != "":
+        return str(value).strip()
+    return default
 
 
 def _to_float(value, default=0.0):
@@ -33,6 +62,15 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _to_bool(value: str, default: bool) -> bool:
+    if value is None:
+        return default
+    raw = str(value).strip().lower()
+    if raw == "":
+        return default
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
@@ -60,6 +98,7 @@ def _format_money(value) -> str:
 class AlertConfig:
     enabled: bool = False
     dry_run: bool = True
+    one_time_per_contract: bool = True
     cooldown_minutes: int = 20
     min_score: int = 90
     min_confidence: int = 65
@@ -79,6 +118,7 @@ class AlertDispatchReport:
     eligible: int = 0
     sent: int = 0
     suppressed_by_cooldown: int = 0
+    suppressed_by_contract: int = 0
     errors: int = 0
     mode: str = "idle"
 
@@ -90,6 +130,7 @@ class AlertDispatchReport:
             "eligible": self.eligible,
             "sent": self.sent,
             "suppressed_by_cooldown": self.suppressed_by_cooldown,
+            "suppressed_by_contract": self.suppressed_by_contract,
             "errors": self.errors,
             "mode": self.mode,
         }
@@ -143,7 +184,20 @@ class FalconAlertEngine:
         if not isinstance(contracts, dict):
             contracts = {}
             state["contracts"] = contracts
-        contracts[contract] = {"last_alert_at": scanned_at}
+        previous = contracts.get(contract, {})
+        first_alert_at = previous.get("first_alert_at") if isinstance(previous, dict) else None
+        contracts[contract] = {
+            "last_alert_at": scanned_at,
+            "first_alert_at": first_alert_at or scanned_at,
+            "alerted_once": True,
+        }
+
+    def _already_alerted(self, state: Dict[str, object], contract: str) -> bool:
+        contracts = state.get("contracts", {})
+        contract_state = contracts.get(contract) if isinstance(contracts, dict) else None
+        if not isinstance(contract_state, dict):
+            return False
+        return bool(contract_state.get("alerted_once", False))
 
     def _buy_sell_ratio(self, buys_5m: int, sells_5m: int) -> float:
         return float(buys_5m) if sells_5m <= 0 else float(buys_5m) / float(sells_5m)
@@ -186,12 +240,16 @@ class FalconAlertEngine:
         symbol = str(token.get("token_symbol", "UNKNOWN"))
         contract = str(token.get("contract_address", "N/A"))
         score = _to_int(token.get("score"))
+        signal = str(token.get("signal", "PASS"))
         conviction = str(token.get("conviction_rating", "WATCH"))
+        risk = str(token.get("risk_label", "HIGH"))
         market_cap = _format_money(token.get("market_cap_usd"))
         liquidity = _format_money(token.get("liquidity_usd"))
         price_5m = _to_float(token.get("price_change_5m_pct"))
         buys_5m = _to_int(token.get("buys_5m"))
         sells_5m = _to_int(token.get("sells_5m"))
+        smart_wallet_count = _to_int(token.get("smart_wallet_count"))
+        social_heat = str(token.get("social_heat", "⚪ QUIET"))
         pair_age = token.get("pair_age_minutes")
         age_display = "N/A"
         if pair_age is not None:
@@ -219,21 +277,24 @@ class FalconAlertEngine:
         return (
             "FALCON HIGH PRIORITY OPPORTUNITY ALERT\n\n"
             f"Token: {name} ({symbol})\n"
+            f"Signal: {signal} | Falcon Score: {score}/100\n"
+            f"Conviction: {conviction} | Risk: {risk}\n"
             f"Contract: {contract}\n"
-            f"Falcon Score: {score}/100 | Conviction: {conviction}\n"
             f"Market Cap: {market_cap} | Liquidity: {liquidity}\n"
             f"5m Change: {price_5m:+.2f}%\n"
             f"Buys vs Sells (5m): {buys_5m}/{sells_5m}\n"
+            f"Smart Wallet Count: {smart_wallet_count}\n"
+            f"Social Heat: {social_heat}\n"
             f"Token Age: {age_display}\n\n"
             "Main Reasons:\n"
             f"{reason_lines}\n\n"
             f"DexScreener: {chart_url}\n\n"
-            "Warning: This is a high-risk opportunity, not a guaranteed buy."
+            "Warning: high-risk opportunity, not financial advice."
         )
 
     def _send_telegram(self, message: str) -> bool:
-        token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-        chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+        token = _get_setting("TELEGRAM_BOT_TOKEN", "").strip()
+        chat_id = _get_setting("TELEGRAM_CHAT_ID", "").strip()
         if not token or not chat_id:
             return False
 
@@ -279,6 +340,10 @@ class FalconAlertEngine:
                 continue
 
             report.eligible += 1
+            if self.config.one_time_per_contract and self._already_alerted(state, contract):
+                report.suppressed_by_contract += 1
+                continue
+
             if self._is_cooldown_active(state, contract, now_dt):
                 report.suppressed_by_cooldown += 1
                 continue
@@ -325,23 +390,24 @@ class FalconAlertEngine:
 def create_default_alert_engine() -> FalconAlertEngine:
     allowed_momentum = tuple(
         item.strip().upper()
-        for item in os.getenv("FALCON_ALERT_ALLOWED_MOMENTUM", "BULLISH,NEUTRAL").split(",")
+        for item in _get_setting("FALCON_ALERT_ALLOWED_MOMENTUM", "BULLISH,NEUTRAL").split(",")
         if item.strip()
     )
     if not allowed_momentum:
         allowed_momentum = ("BULLISH", "NEUTRAL")
 
     config = AlertConfig(
-        enabled=_env_bool("FALCON_ALERTS_ENABLED", False),
-        dry_run=_env_bool("FALCON_ALERT_DRY_RUN", True),
-        cooldown_minutes=_to_int(os.getenv("FALCON_ALERT_COOLDOWN_MINUTES"), 20),
-        min_score=_to_int(os.getenv("FALCON_ALERT_MIN_SCORE"), 90),
-        min_confidence=_to_int(os.getenv("FALCON_ALERT_MIN_CONFIDENCE"), 65),
-        min_liquidity_usd=_to_float(os.getenv("FALCON_ALERT_MIN_LIQUIDITY_USD"), 20000),
-        min_price_change_5m_pct=_to_float(os.getenv("FALCON_ALERT_MIN_5M_CHANGE_PCT"), 0),
-        min_buy_sell_ratio=_to_float(os.getenv("FALCON_ALERT_MIN_BUY_SELL_RATIO"), 1.1),
-        min_buys_5m=_to_int(os.getenv("FALCON_ALERT_MIN_BUYS_5M"), 10),
-        max_risk_rank=_to_int(os.getenv("FALCON_ALERT_MAX_RISK_RANK"), 2),
+        enabled=_to_bool(_get_setting("FALCON_ALERTS_ENABLED", "0"), False),
+        dry_run=_to_bool(_get_setting("FALCON_ALERT_DRY_RUN", "1"), True),
+        one_time_per_contract=_to_bool(_get_setting("FALCON_ALERT_ONE_TIME_PER_CONTRACT", "1"), True),
+        cooldown_minutes=_to_int(_get_setting("FALCON_ALERT_COOLDOWN_MINUTES", "20"), 20),
+        min_score=_to_int(_get_setting("FALCON_ALERT_MIN_SCORE", "90"), 90),
+        min_confidence=_to_int(_get_setting("FALCON_ALERT_MIN_CONFIDENCE", "65"), 65),
+        min_liquidity_usd=_to_float(_get_setting("FALCON_ALERT_MIN_LIQUIDITY_USD", "20000"), 20000),
+        min_price_change_5m_pct=_to_float(_get_setting("FALCON_ALERT_MIN_5M_CHANGE_PCT", "0"), 0),
+        min_buy_sell_ratio=_to_float(_get_setting("FALCON_ALERT_MIN_BUY_SELL_RATIO", "1.1"), 1.1),
+        min_buys_5m=_to_int(_get_setting("FALCON_ALERT_MIN_BUYS_5M", "10"), 10),
+        max_risk_rank=_to_int(_get_setting("FALCON_ALERT_MAX_RISK_RANK", "2"), 2),
         allowed_momentum=allowed_momentum,
     )
     return FalconAlertEngine(config)
