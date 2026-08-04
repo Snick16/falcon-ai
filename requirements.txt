@@ -2,3 +2,5 @@ streamlit
 requests
 pandas
 python-telegram-bot
+certifi
+truststore

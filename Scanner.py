@@ -3,13 +3,20 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from falcon_alerts import create_default_alert_engine
+from social_intelligence import SocialContext, create_default_social_engine
+
 BOOSTS_URL = "https://api.dexscreener.com/token-boosts/latest/v1"
 TOKEN_URL = "https://api.dexscreener.com/tokens/v1/solana/{}"
 REQUIRED_TOKEN_KEYS = ("signal", "momentum", "confidence", "risk_label")
 MEMORY_DIR = Path(__file__).resolve().parent / ".falcon_memory"
 SNAPSHOTS_DIR = MEMORY_DIR / "snapshots"
 DISAPPEARED_HISTORY_FILE = MEMORY_DIR / "disappeared_history.jsonl"
+SCANNED_CONTRACTS_FILE = MEMORY_DIR / "scanned_contracts.json"
+SMART_WALLET_TRACKER_FILE = MEMORY_DIR / "smart_wallet_tracker.json"
 MAX_SNAPSHOTS = 500
+SOCIAL_ENGINE = create_default_social_engine()
+ALERT_ENGINE = create_default_alert_engine()
 
 
 def safe_number(value):
@@ -23,6 +30,172 @@ def safe_number(value):
 def ensure_memory_dirs():
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_seen_contracts():
+    """Load persistent set of contracts already scanned in prior runs."""
+    ensure_memory_dirs()
+    if not SCANNED_CONTRACTS_FILE.exists():
+        return set()
+
+    try:
+        with SCANNED_CONTRACTS_FILE.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return set()
+
+    if not isinstance(raw, list):
+        return set()
+
+    return {
+        str(contract).strip()
+        for contract in raw
+        if str(contract).strip()
+    }
+
+
+def save_seen_contracts(contracts):
+    """Persist scanned contracts to prevent duplicate new-token detections."""
+    ensure_memory_dirs()
+    serialized = sorted(
+        {
+            str(contract).strip()
+            for contract in contracts
+            if str(contract).strip()
+        }
+    )
+    with SCANNED_CONTRACTS_FILE.open("w", encoding="utf-8") as handle:
+        json.dump(serialized, handle, ensure_ascii=True)
+
+
+def parse_iso_datetime(value):
+    """Parse an ISO datetime string safely."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def load_smart_wallet_tracker():
+    """Load smart-wallet activity memory used for rolling 10-minute clustering."""
+    ensure_memory_dirs()
+    if not SMART_WALLET_TRACKER_FILE.exists():
+        return {}
+    try:
+        with SMART_WALLET_TRACKER_FILE.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    if not isinstance(payload, dict):
+        return {}
+    contracts = payload.get("contracts", payload)
+    if not isinstance(contracts, dict):
+        return {}
+    return contracts
+
+
+def save_smart_wallet_tracker(tracker_state):
+    """Persist smart-wallet tracker state."""
+    ensure_memory_dirs()
+    payload = {"contracts": tracker_state}
+    with SMART_WALLET_TRACKER_FILE.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=True)
+
+
+def prune_smart_wallet_tracker(tracker_state, now_dt):
+    """Keep tracker compact by retaining only recent activity windows."""
+    cutoff = now_dt.timestamp() - (24 * 3600)
+    pruned = {}
+    for contract, events in tracker_state.items():
+        if not isinstance(events, list):
+            continue
+        kept = []
+        for event in events:
+            event_dt = parse_iso_datetime((event or {}).get("ts"))
+            if not event_dt:
+                continue
+            if event_dt.timestamp() >= cutoff:
+                kept.append(event)
+        if kept:
+            pruned[contract] = kept
+    return pruned
+
+
+def estimate_tracked_wallet_buys(pair, age_minutes):
+    """Estimate tracked profitable-wallet buy count from early trading behavior."""
+    txns_5m = pair.get("txns", {}).get("m5", {})
+    buys_5m = int(txns_5m.get("buys", 0) or 0)
+    sells_5m = int(txns_5m.get("sells", 0) or 0)
+    volume_5m = safe_number(pair.get("volume", {}).get("m5"))
+    liquidity = safe_number(pair.get("liquidity", {}).get("usd"))
+
+    if age_minutes is None or age_minutes > 240:
+        return 0, []
+
+    reasons = ["tracking newly launched token flow"]
+
+    if buys_5m >= 45 and buys_5m > sells_5m and volume_5m >= 12_000 and liquidity >= 20_000:
+        return 3, reasons + ["3 tracked wallets estimated from strong coordinated buy flow"]
+    if buys_5m >= 22 and buys_5m > sells_5m and volume_5m >= 5_000:
+        return 2, reasons + ["2 tracked wallets estimated from sustained buy pressure"]
+    if buys_5m >= 8 and buys_5m > sells_5m:
+        return 1, reasons + ["1 tracked wallet estimated from early buy pressure"]
+    return 0, []
+
+
+def get_recent_wallet_count(tracker_state, contract_address, now_dt, window_minutes=10):
+    """Count tracked-wallet events for a token over a rolling window."""
+    events = tracker_state.get(contract_address, [])
+    if not isinstance(events, list):
+        return 0
+
+    cutoff = now_dt.timestamp() - (window_minutes * 60)
+    total = 0
+    for event in events:
+        event_dt = parse_iso_datetime((event or {}).get("ts"))
+        if not event_dt or event_dt.timestamp() < cutoff:
+            continue
+        try:
+            count = int((event or {}).get("wallet_count", 0) or 0)
+        except (TypeError, ValueError):
+            count = 0
+        total += max(0, count)
+    return total
+
+
+def append_wallet_event(tracker_state, contract_address, scanned_at, wallet_count):
+    """Append wallet activity for the contract when tracked wallets are detected."""
+    if wallet_count <= 0:
+        return
+    tracker_state.setdefault(contract_address, []).append(
+        {"ts": scanned_at, "wallet_count": int(wallet_count)}
+    )
+
+
+def get_smart_wallet_display(wallet_count):
+    """Render wallet intensity markers for dashboard display."""
+    if wallet_count <= 0:
+        return "-"
+    if wallet_count == 1:
+        return "🔥 1"
+    if wallet_count == 2:
+        return "🔥🔥 2"
+    return "🔥🔥🔥 3+"
+
+
+def get_wallet_cluster_bonus(wallet_count):
+    """Increase Falcon score when wallet clustering appears inside 10 minutes."""
+    if wallet_count >= 3:
+        return 12, "multiple tracked wallets (3+) bought within 10 minutes"
+    if wallet_count >= 2:
+        return 7, "multiple tracked wallets (2) bought within 10 minutes"
+    return 0, ""
 
 
 def load_latest_snapshot():
@@ -349,6 +522,178 @@ def classify_momentum(price_5m, buys_5m, sells_5m):
     return "NEUTRAL"
 
 
+def has_healthy_buy_sell_ratio(buys_5m, sells_5m):
+    """Define healthy short-term flow as non-negative buy pressure with activity."""
+    total = buys_5m + sells_5m
+    if total < 6:
+        return False
+    return buys_5m >= sells_5m
+
+
+def qualifies_highlight(score, liquidity_usd, price_change_5m_pct, buys_5m, sells_5m):
+    """Apply Falcon V2 highlight criteria for standout candidates."""
+    return (
+        score >= 90
+        and liquidity_usd > 10_000
+        and price_change_5m_pct > 0
+        and has_healthy_buy_sell_ratio(buys_5m, sells_5m)
+    )
+
+
+def get_pair_age_minutes(pair):
+    """Return pair age in minutes from DexScreener timestamp."""
+    pair_created = pair.get("pairCreatedAt")
+    if not pair_created:
+        return None
+    age_seconds = datetime.now(timezone.utc).timestamp() - (pair_created / 1000)
+    return max(0.0, age_seconds / 60)
+
+
+def get_holder_count(pair):
+    """Best-effort holder count extraction from available payload keys."""
+    candidates = [
+        pair.get("holderCount"),
+        pair.get("holders"),
+        pair.get("info", {}).get("holderCount") if isinstance(pair.get("info"), dict) else None,
+        pair.get("info", {}).get("holders") if isinstance(pair.get("info"), dict) else None,
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            for nested_key in ("count", "total", "holders"):
+                nested_value = candidate.get(nested_key)
+                if nested_value is None:
+                    continue
+                try:
+                    return int(nested_value)
+                except (TypeError, ValueError):
+                    continue
+        if candidate is None:
+            continue
+        try:
+            return int(candidate)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def classify_conviction(score):
+    """Map intelligence score to Falcon conviction rating tiers."""
+    if score >= 95:
+        return "LEGENDARY"
+    if score >= 90:
+        return "ELITE"
+    if score >= 80:
+        return "STRONG"
+    return "WATCH"
+
+
+def calculate_intelligence_engine(pair, previous_token):
+    """Weighted Falcon Intelligence Engine for high-conviction opportunities."""
+    score = 0
+    reasons = []
+    penalties = []
+
+    liquidity = safe_number(pair.get("liquidity", {}).get("usd"))
+    market_cap = safe_number(pair.get("marketCap") or pair.get("fdv"))
+    volume_5m = safe_number(pair.get("volume", {}).get("m5"))
+    price_5m = safe_number(pair.get("priceChange", {}).get("m5"))
+    txns_5m = pair.get("txns", {}).get("m5", {})
+    buys_5m = int(txns_5m.get("buys", 0) or 0)
+    sells_5m = int(txns_5m.get("sells", 0) or 0)
+    total_txns_5m = buys_5m + sells_5m
+    pair_age_minutes = get_pair_age_minutes(pair)
+    holder_count = get_holder_count(pair)
+
+    previous_volume_5m = safe_number((previous_token or {}).get("volume_5m_usd"))
+    previous_price_5m = safe_number((previous_token or {}).get("price_change_5m_pct"))
+    previous_holder_count = (previous_token or {}).get("holder_count")
+    try:
+        previous_holder_count = int(previous_holder_count)
+    except (TypeError, ValueError):
+        previous_holder_count = None
+
+    if 10_000 <= liquidity <= 250_000:
+        score += 25
+        reasons.append("+25 liquidity between $10k and $250k")
+
+    if buys_5m > sells_5m:
+        score += 20
+        reasons.append("+20 buy volume exceeds sell volume")
+
+    if previous_token and volume_5m > previous_volume_5m:
+        score += 15
+        reasons.append("+15 5-minute volume increasing scan-over-scan")
+
+    if (
+        holder_count is not None
+        and previous_holder_count is not None
+        and holder_count > previous_holder_count
+    ):
+        score += 10
+        reasons.append("+10 holder count increasing")
+
+    if pair_age_minutes is not None and pair_age_minutes < 30:
+        score += 10
+        reasons.append("+10 token age under 30 minutes")
+
+    if 0 < market_cap < 250_000:
+        score += 10
+        reasons.append("+10 market cap below $250k")
+
+    if total_txns_5m >= 20:
+        score += 5
+        reasons.append("+5 healthy transaction count")
+
+    if previous_token and price_5m > previous_price_5m:
+        score += 5
+        reasons.append("+5 momentum increasing")
+
+    avg_tx_size = (volume_5m / total_txns_5m) if total_txns_5m > 0 else 0.0
+    if avg_tx_size > 2_500 and total_txns_5m < 20:
+        score -= 20
+        penalties.append("-20 large whale concentration suspected")
+
+    if liquidity < 10_000:
+        score -= 20
+        penalties.append("-20 low liquidity")
+
+    if sells_5m > buys_5m * 1.2 and sells_5m >= 10:
+        score -= 15
+        penalties.append("-15 sell pressure")
+
+    honeypot_like = (
+        liquidity < 5_000
+        and volume_5m > 10_000
+        and buys_5m > sells_5m * 1.8
+    )
+    if honeypot_like:
+        score -= 20
+        penalties.append("-20 honeypot indicator risk")
+
+    rug_risk = False
+    if market_cap > 0:
+        liq_to_mcap = liquidity / market_cap
+        rug_risk = liq_to_mcap < 0.03 and pair_age_minutes is not None and pair_age_minutes < 60
+    if rug_risk:
+        score -= 25
+        penalties.append("-25 rug risk profile")
+
+    bounded_score = int(max(0, min(score, 100)))
+    conviction = classify_conviction(bounded_score)
+    all_reasons = reasons + penalties
+    if not all_reasons:
+        all_reasons = ["No weighted criteria triggered"]
+
+    return {
+        "falcon_intelligence_score": bounded_score,
+        "conviction_rating": conviction,
+        "falcon_intelligence_reasons": all_reasons,
+        "falcon_intelligence_penalties": penalties,
+        "holder_count": holder_count,
+        "pair_age_minutes": pair_age_minutes,
+    }
+
+
 def classify_signal(
     score,
     confidence,
@@ -507,6 +852,12 @@ def scan_tokens(max_tokens=30, top_n=15):
     """
     try:
         scanned_at = datetime.now(timezone.utc).isoformat()
+        scanned_at_dt = parse_iso_datetime(scanned_at) or datetime.now(timezone.utc)
+        seen_contracts = load_seen_contracts()
+        smart_wallet_tracker = prune_smart_wallet_tracker(
+            load_smart_wallet_tracker(),
+            scanned_at_dt,
+        )
         previous_snapshot = load_latest_snapshot()
         previous_tokens = (previous_snapshot or {}).get("tokens", [])
         previous_by_contract = {
@@ -535,6 +886,7 @@ def scan_tokens(max_tokens=30, top_n=15):
                 break
 
         if not addresses:
+            alert_report = ALERT_ENGINE.process_scan([], scanned_at)
             record_disappeared_tokens(previous_tokens, [], scanned_at)
             save_snapshot(scanned_at, [])
             return {
@@ -544,6 +896,7 @@ def scan_tokens(max_tokens=30, top_n=15):
                 "opportunities_count": 0,
                 "highest_score": 0,
                 "tokens": [],
+                "alerts": alert_report.to_dict(),
             }
 
         token_response = requests.get(
@@ -562,6 +915,8 @@ def scan_tokens(max_tokens=30, top_n=15):
                 pairs_by_token.setdefault(address, []).append(pair)
 
         opportunities = []
+        seen_contracts_in_scan = set()
+        new_tokens_detected = []
 
         for address in addresses:
             token_pairs = pairs_by_token.get(address, [])
@@ -569,15 +924,45 @@ def scan_tokens(max_tokens=30, top_n=15):
                 continue
 
             pair = get_best_pair(token_pairs)
+            base = pair.get("baseToken", {})
+            contract_address = str(base.get("address", "") or "").strip()
+            previous_token = previous_by_contract.get(contract_address)
             score, reasons = calculate_score(pair)
             risk_label = classify_risk(score, pair)
-            base = pair.get("baseToken", {})
+            if not contract_address or contract_address in seen_contracts_in_scan:
+                continue
+            seen_contracts_in_scan.add(contract_address)
+
             txns_5m = pair.get("txns", {}).get("m5", {})
             liquidity_usd = safe_number(pair.get("liquidity", {}).get("usd"))
             volume_5m_usd = safe_number(pair.get("volume", {}).get("m5"))
             price_change_5m_pct = safe_number(pair.get("priceChange", {}).get("m5"))
             buys_5m = int(txns_5m.get("buys", 0) or 0)
             sells_5m = int(txns_5m.get("sells", 0) or 0)
+            pair_age_minutes = get_pair_age_minutes(pair)
+
+            estimated_wallet_count, smart_wallet_reasons = estimate_tracked_wallet_buys(
+                pair,
+                pair_age_minutes,
+            )
+            recent_wallet_count = get_recent_wallet_count(
+                smart_wallet_tracker,
+                contract_address,
+                scanned_at_dt,
+                window_minutes=10,
+            )
+            combined_wallet_count = recent_wallet_count + estimated_wallet_count
+            wallet_bonus, wallet_bonus_reason = get_wallet_cluster_bonus(combined_wallet_count)
+            if wallet_bonus:
+                score = min(100, score + wallet_bonus)
+                reasons.append(wallet_bonus_reason)
+
+            append_wallet_event(
+                smart_wallet_tracker,
+                contract_address,
+                scanned_at,
+                estimated_wallet_count,
+            )
 
             momentum = classify_momentum(price_change_5m_pct, buys_5m, sells_5m)
             confidence = calculate_confidence(
@@ -598,6 +983,45 @@ def scan_tokens(max_tokens=30, top_n=15):
                 buys_5m=buys_5m,
                 sells_5m=sells_5m,
             )
+            intelligence = calculate_intelligence_engine(pair, previous_token)
+            social_intelligence = SOCIAL_ENGINE.evaluate(
+                SocialContext(
+                    pair=pair,
+                    previous_token=previous_token,
+                    boost_amount=boost_amounts.get(address, 0),
+                    holder_count=intelligence.get("holder_count"),
+                    scanned_at=scanned_at_dt,
+                )
+            )
+
+            smart_wallet_high = combined_wallet_count >= 3
+            buy_now_reasons = []
+            if smart_wallet_high and score > 90:
+                signal = "BUY NOW"
+                buy_now_reasons = [
+                    "Smart wallet cluster is HIGH (3+ tracked wallets in 10 minutes)",
+                    f"Falcon Score is {score} (>90)",
+                ]
+                signal_reasons = buy_now_reasons + signal_reasons
+
+            high_priority_alert = False
+            high_priority_reasons = []
+            if social_intelligence.get("social_heat_label") == "VIRAL" and score > 90:
+                high_priority_alert = True
+                high_priority_reasons = [
+                    "Social Heat is VIRAL",
+                    f"Falcon Score is {score} (>90)",
+                ]
+
+            is_brand_new = contract_address not in seen_contracts
+            if is_brand_new:
+                new_tokens_detected.append(
+                    {
+                        "token_name": base.get("name", "Unknown"),
+                        "token_symbol": base.get("symbol", "UNKNOWN"),
+                        "contract_address": contract_address,
+                    }
+                )
 
             current_token = {
                 "score": score,
@@ -609,17 +1033,43 @@ def scan_tokens(max_tokens=30, top_n=15):
                 "reasons": reasons,
                 "token_name": base.get("name", "Unknown"),
                 "token_symbol": base.get("symbol", "UNKNOWN"),
-                "contract_address": base.get("address", "N/A"),
+                "contract_address": contract_address or "N/A",
                 "market_cap_usd": safe_number(pair.get("marketCap") or pair.get("fdv")),
                 "liquidity_usd": liquidity_usd,
                 "volume_5m_usd": volume_5m_usd,
                 "price_change_5m_pct": price_change_5m_pct,
                 "buys_5m": buys_5m,
                 "sells_5m": sells_5m,
+                "falcon_intelligence_score": intelligence["falcon_intelligence_score"],
+                "conviction_rating": intelligence["conviction_rating"],
+                "falcon_intelligence_reasons": intelligence["falcon_intelligence_reasons"],
+                "falcon_intelligence_penalties": intelligence["falcon_intelligence_penalties"],
+                "holder_count": intelligence["holder_count"],
+                "pair_age_minutes": intelligence["pair_age_minutes"],
+                "smart_wallet_count": combined_wallet_count,
+                "smart_wallet_display": get_smart_wallet_display(combined_wallet_count),
+                "smart_wallet_high": smart_wallet_high,
+                "smart_wallet_reasons": smart_wallet_reasons,
+                "social_heat_score": social_intelligence.get("social_heat_score", 0),
+                "social_heat_label": social_intelligence.get("social_heat_label", "QUIET"),
+                "social_heat": social_intelligence.get("social_heat_badge", "⚪ QUIET"),
+                "social_heat_reasons": social_intelligence.get("social_heat_reasons", []),
+                "social_provider_scores": social_intelligence.get("social_provider_scores", {}),
+                "high_priority_alert": high_priority_alert,
+                "high_priority_reasons": high_priority_reasons,
+                "buy_now_reasons": buy_now_reasons,
+                "healthy_buy_sell_ratio": has_healthy_buy_sell_ratio(buys_5m, sells_5m),
+                "highlight": qualifies_highlight(
+                    score,
+                    liquidity_usd,
+                    price_change_5m_pct,
+                    buys_5m,
+                    sells_5m,
+                ),
+                "is_brand_new": is_brand_new,
                 "dexscreener_url": pair.get("url", ""),
                 "boost_amount": boost_amounts.get(address, 0),
             }
-            previous_token = previous_by_contract.get(current_token.get("contract_address"))
             current_token.update(build_memory_delta(current_token, previous_token))
 
             opportunities.append(
@@ -631,11 +1081,21 @@ def scan_tokens(max_tokens=30, top_n=15):
 
         top_tokens = [normalize_token_shape(token) for token in top_tokens]
 
+        if seen_contracts_in_scan:
+            save_seen_contracts(seen_contracts.union(seen_contracts_in_scan))
+        save_smart_wallet_tracker(smart_wallet_tracker)
+
+        for token in new_tokens_detected:
+            print(
+                "NEW TOKEN DETECTED | "
+                f"{token.get('token_name', 'Unknown')} "
+                f"({token.get('token_symbol', 'UNKNOWN')}) | "
+                f"{token.get('contract_address', 'N/A')}"
+            )
+
+        alert_report = ALERT_ENGINE.process_scan(top_tokens, scanned_at)
         record_disappeared_tokens(previous_tokens, opportunities, scanned_at)
         save_snapshot(scanned_at, opportunities)
-
-        if top_tokens:
-            print(top_tokens[0])
 
         return {
             "ok": True,
@@ -643,7 +1103,9 @@ def scan_tokens(max_tokens=30, top_n=15):
             "scanned_at": scanned_at,
             "opportunities_count": len(top_tokens),
             "highest_score": top_tokens[0]["score"] if top_tokens else 0,
+            "new_tokens_detected": len(new_tokens_detected),
             "tokens": top_tokens,
+            "alerts": alert_report.to_dict(),
         }
 
     except requests.RequestException as error:
@@ -653,7 +1115,18 @@ def scan_tokens(max_tokens=30, top_n=15):
             "scanned_at": datetime.now(timezone.utc).isoformat(),
             "opportunities_count": 0,
             "highest_score": 0,
+            "new_tokens_detected": 0,
             "tokens": [],
+            "alerts": {
+                "enabled": ALERT_ENGINE.config.enabled,
+                "dry_run": ALERT_ENGINE.config.dry_run,
+                "evaluated": 0,
+                "eligible": 0,
+                "sent": 0,
+                "suppressed_by_cooldown": 0,
+                "errors": 1,
+                "mode": "error",
+            },
         }
     except Exception as error:
         return {
@@ -662,8 +1135,24 @@ def scan_tokens(max_tokens=30, top_n=15):
             "scanned_at": datetime.now(timezone.utc).isoformat(),
             "opportunities_count": 0,
             "highest_score": 0,
+            "new_tokens_detected": 0,
             "tokens": [],
+            "alerts": {
+                "enabled": ALERT_ENGINE.config.enabled,
+                "dry_run": ALERT_ENGINE.config.dry_run,
+                "evaluated": 0,
+                "eligible": 0,
+                "sent": 0,
+                "suppressed_by_cooldown": 0,
+                "errors": 1,
+                "mode": "error",
+            },
         }
+
+
+def send_test_alert():
+    """Trigger a safe Falcon TEST ALERT to validate Telegram connectivity."""
+    return ALERT_ENGINE.send_test_alert()
 
 
 def main():
