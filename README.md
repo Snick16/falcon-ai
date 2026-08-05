@@ -10,7 +10,7 @@ Falcon AI Hunter scans Solana token opportunities, rates each candidate with the
 - new_solana_pairs: public DexScreener latest token profiles flow
 - pumpfun_tokens: optional source, enabled with PUMPFUN_ENABLED using a public Pump.fun endpoint
 - telegram_channels: optional source, enabled with TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION, TELEGRAM_CHANNELS
-- x_social: optional source, enabled with X_BEARER_TOKEN and X_SEARCH_TERMS
+- x_social: optional source, enabled with X_BEARER_TOKEN and X_ACCOUNTS
 
 ## Environment Variables
 
@@ -30,7 +30,7 @@ Optional scanner/social variables:
 - TELEGRAM_LOOKBACK_MINUTES
 - TELEGRAM_MAX_MESSAGES_PER_CHANNEL
 - X_BEARER_TOKEN
-- X_SEARCH_TERMS
+- X_ACCOUNTS
 - X_API_URL
 - PUMPFUN_ENABLED
 - PUMPFUN_MAX_TOKENS
@@ -98,6 +98,8 @@ python -m unittest -v test_telegram_parser.py
 
 python -m unittest -v test_pumpfun_parser.py
 
+python -m unittest -v test_x_parser.py
+
 The smoke test checks:
 
 - project modules compile
@@ -107,3 +109,4 @@ The smoke test checks:
 - scanner status includes not-configured source messages
 - Telegram parser extracts CA/contract/mint/address calls from sample messages without live Telegram login
 - Pump.fun parser normalizes and deduplicates sample mint payload rows without live network dependency
+- X parser extracts Solana contract mentions from posts and links, merging duplicate mentions across authors without live network dependency

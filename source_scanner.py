@@ -14,6 +14,7 @@ DEX_TOKEN_PROFILES_LATEST_URL = "https://api.dexscreener.com/token-profiles/late
 DEX_TOKEN_BATCH_URL = "https://api.dexscreener.com/tokens/v1/solana/{}"
 DEX_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search"
 PUMPFUN_RECENT_COINS_URL = "https://frontend-api-v3.pump.fun/coins"
+X_RECENT_SEARCH_URL = "https://api.twitter.com/2/tweets/search/recent"
 
 SOLANA_CHAIN_ID = "solana"
 SOLANA_ADDRESS_RE = re.compile(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b")
@@ -145,6 +146,25 @@ def _parse_telegram_channels(raw_value: str) -> List[str]:
         seen.add(key)
         unique.append(channel)
     return unique
+
+
+def _parse_csv_list(raw_value: str) -> List[str]:
+    if not raw_value:
+        return []
+    values = []
+    seen = set()
+    for part in str(raw_value).replace("\n", ",").split(","):
+        item = part.strip()
+        if item.startswith("@"):  # normalize usernames/accounts.
+            item = item[1:]
+        if not item:
+            continue
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        values.append(item)
+    return values
 
 
 TELEGRAM_CA_LABEL_RE = re.compile(
@@ -762,60 +782,244 @@ def _extract_solana_addresses_from_text(text: str) -> List[str]:
     return cleaned
 
 
-def scan_x_social(limit: int = 40) -> List[TokenCandidate]:
-    bearer = os.getenv("X_BEARER_TOKEN", "").strip()
-    terms = os.getenv("X_SEARCH_TERMS", "").strip()
-    if not bearer or not terms:
-        return []
+def parse_x_posts(post_rows: Sequence[dict]) -> List[dict]:
+    hits_by_contract: Dict[str, dict] = {}
 
-    api_url = os.getenv("X_API_URL", "https://api.twitter.com/2/tweets/search/recent").strip()
-    headers = {"Authorization": f"Bearer {bearer}"}
-
-    all_addresses: List[str] = []
-    for raw_term in [item.strip() for item in terms.split(",") if item.strip()]:
-        payload = _request_json(
-            api_url,
-            params={"query": raw_term, "max_results": 20, "tweet.fields": "created_at,text"},
-            headers=headers,
-            timeout=10,
-            retries=1,
-        )
-        rows = (payload or {}).get("data", []) if isinstance(payload, dict) else []
-        for row in rows:
-            text = str((row or {}).get("text", "") or "")
-            for address in _extract_solana_addresses_from_text(text):
-                all_addresses.append(address)
-
-    seen = set()
-    unique_addresses: List[str] = []
-    for address in all_addresses:
-        if address in seen:
+    for row in post_rows:
+        if not isinstance(row, dict):
             continue
-        seen.add(address)
-        unique_addresses.append(address)
-        if len(unique_addresses) >= max(1, limit):
-            break
 
-    if not unique_addresses:
-        return []
+        text = str(row.get("text", "") or "")
+        urls = row.get("urls", []) if isinstance(row.get("urls"), list) else []
+        scan_blob = "\n".join([text] + [str(url or "") for url in urls])
+        contracts = _extract_solana_addresses_from_text(scan_blob)
+        if not contracts:
+            continue
 
-    pairs_by_token = _fetch_pairs_for_token_addresses(unique_addresses)
+        symbol, name = _extract_symbol_and_name_from_text(text)
+        author_id = str(row.get("author_id", "") or "")
+        author_username = str(row.get("author_username", "") or "")
+        tweet_id = row.get("tweet_id")
+        tweet_url = ""
+        if author_username and tweet_id is not None:
+            tweet_url = f"https://x.com/{author_username}/status/{tweet_id}"
+
+        for contract in contracts:
+            payload = hits_by_contract.get(contract)
+            if not payload:
+                payload = {
+                    "token_address": contract,
+                    "symbol": symbol,
+                    "name": name,
+                    "mention_count": 0,
+                    "unique_author_count": 0,
+                    "author_ids": set(),
+                    "author_usernames": set(),
+                    "posts": [],
+                }
+                hits_by_contract[contract] = payload
+
+            payload["mention_count"] += 1
+            if author_id:
+                payload["author_ids"].add(author_id)
+            if author_username:
+                payload["author_usernames"].add(author_username)
+
+            payload["posts"].append(
+                {
+                    "tweet_id": tweet_id,
+                    "author_id": author_id,
+                    "author_username": author_username,
+                    "created_at": row.get("created_at", ""),
+                    "tweet_url": tweet_url,
+                    "urls": urls,
+                    "text": text,
+                }
+            )
+
+            if payload.get("symbol") in ("", "UNKNOWN") and symbol not in ("", "UNKNOWN"):
+                payload["symbol"] = symbol
+            if payload.get("name") in ("", "Unknown") and name not in ("", "Unknown"):
+                payload["name"] = name
+
+    normalized_hits = []
+    for contract, payload in hits_by_contract.items():
+        payload["token_address"] = contract
+        payload["unique_author_count"] = len(payload.get("author_ids", set()))
+        payload["author_ids"] = sorted(payload.get("author_ids", set()))
+        payload["author_usernames"] = sorted(payload.get("author_usernames", set()))
+        normalized_hits.append(payload)
+
+    return normalized_hits
+
+
+def scan_x_social(limit: int = 40):
+    started = time.perf_counter()
+    bearer = os.getenv("X_BEARER_TOKEN", "").strip()
+    accounts = _parse_csv_list(os.getenv("X_ACCOUNTS", "").strip())
+    api_url = os.getenv("X_API_URL", X_RECENT_SEARCH_URL).strip() or X_RECENT_SEARCH_URL
+
+    details = {
+        "configured": True,
+        "accounts_requested": len(accounts),
+        "posts_checked": 0,
+        "contracts_detected": 0,
+        "candidates_returned": 0,
+        "elapsed_ms": 0,
+        "error_message": "",
+    }
+
+    missing = []
+    if not bearer:
+        missing.append("X_BEARER_TOKEN")
+    if not accounts:
+        missing.append("X_ACCOUNTS")
+    if missing:
+        details["configured"] = False
+        details["error_message"] = "X scanner not configured: missing " + ", ".join(missing)
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    headers = {"Authorization": f"Bearer {bearer}"}
+    collected_rows: List[dict] = []
+
+    for account in accounts:
+        try:
+            payload = _request_json(
+                api_url,
+                params={
+                    "query": f"from:{account} -is:retweet",
+                    "max_results": min(100, max(10, int(limit or 1))),
+                    "tweet.fields": "author_id,created_at,entities",
+                    "expansions": "author_id",
+                    "user.fields": "username",
+                },
+                headers=headers,
+                timeout=10,
+                retries=1,
+            )
+        except Exception:
+            continue
+
+        tweets = (payload or {}).get("data", []) if isinstance(payload, dict) else []
+        includes = (payload or {}).get("includes", {}) if isinstance(payload, dict) else {}
+        users = includes.get("users", []) if isinstance(includes, dict) else []
+        user_by_id = {
+            str(user.get("id", "") or ""): str(user.get("username", "") or "")
+            for user in users
+            if isinstance(user, dict)
+        }
+
+        for tweet in tweets:
+            if not isinstance(tweet, dict):
+                continue
+            details["posts_checked"] += 1
+            entities = tweet.get("entities", {}) if isinstance(tweet.get("entities"), dict) else {}
+            urls = []
+            for item in entities.get("urls", []) if isinstance(entities.get("urls"), list) else []:
+                if not isinstance(item, dict):
+                    continue
+                expanded = str(item.get("expanded_url", "") or item.get("url", "") or "")
+                if expanded:
+                    urls.append(expanded)
+
+            author_id = str(tweet.get("author_id", "") or "")
+            collected_rows.append(
+                {
+                    "tweet_id": tweet.get("id"),
+                    "author_id": author_id,
+                    "author_username": user_by_id.get(author_id, account),
+                    "created_at": tweet.get("created_at", ""),
+                    "text": str(tweet.get("text", "") or ""),
+                    "urls": urls,
+                }
+            )
+
+    parsed_hits = parse_x_posts(collected_rows)
+    details["contracts_detected"] = len(parsed_hits)
+    parsed_hits = parsed_hits[:max(1, int(limit or 1))]
+
+    addresses = [str(hit.get("token_address", "") or "").strip() for hit in parsed_hits]
+    addresses = [address for address in addresses if address]
+    if not addresses:
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    hits_by_address = {
+        str(hit.get("token_address", "") or "").strip(): hit
+        for hit in parsed_hits
+        if str(hit.get("token_address", "") or "").strip()
+    }
+    pairs_by_token = _fetch_pairs_for_token_addresses(addresses)
+
     candidates: List[TokenCandidate] = []
     discovered_at = _utc_now_iso()
-    for token_address in unique_addresses:
+    for token_address in addresses:
+        hit = hits_by_address.get(token_address, {})
         pair = _best_pair(pairs_by_token.get(token_address, []))
-        if not pair:
+        primary_post = (hit.get("posts") or [{}])[0] if isinstance(hit.get("posts"), list) else {}
+        primary_url = str(primary_post.get("tweet_url", "") or "")
+        mention_count = int(hit.get("mention_count", 0) or 0)
+
+        if pair:
+            candidate = _build_candidate_from_pair(
+                pair,
+                source="x_social",
+                source_url=str(pair.get("url", "") or primary_url or api_url),
+                discovered_at=discovered_at,
+                social_mentions=mention_count,
+                extra_raw={
+                    "x_posts": list(hit.get("posts", [])),
+                    "x_author_ids": list(hit.get("author_ids", [])),
+                    "x_author_usernames": list(hit.get("author_usernames", [])),
+                    "x_mention_count": mention_count,
+                    "x_unique_author_count": int(hit.get("unique_author_count", 0) or 0),
+                },
+            )
+            if candidate:
+                if hit.get("symbol") not in (None, "", "UNKNOWN"):
+                    candidate.symbol = str(hit.get("symbol"))
+                if hit.get("name") not in (None, "", "Unknown"):
+                    candidate.name = str(hit.get("name"))
+                candidates.append(candidate)
             continue
-        candidate = _build_candidate_from_pair(
-            pair,
-            source="x_social",
-            source_url=str(pair.get("url", "") or api_url),
-            discovered_at=discovered_at,
-            social_mentions=1,
+
+        candidates.append(
+            TokenCandidate(
+                chain=SOLANA_CHAIN_ID,
+                token_address=token_address,
+                symbol=str(hit.get("symbol", "UNKNOWN") or "UNKNOWN"),
+                name=str(hit.get("name", "Unknown") or "Unknown"),
+                source="x_social",
+                source_url=primary_url or api_url,
+                pair_address="",
+                discovered_at=discovered_at,
+                market_cap=0.0,
+                liquidity=0.0,
+                volume_5m=0.0,
+                volume_1h=0.0,
+                volume_24h=0.0,
+                price_change_5m=0.0,
+                price_change_1h=0.0,
+                buys_5m=0,
+                sells_5m=0,
+                token_age_minutes=0.0,
+                social_mentions=mention_count,
+                raw_data={
+                    "pair": {},
+                    "found_by": ["x_social"],
+                    "x_posts": list(hit.get("posts", [])),
+                    "x_author_ids": list(hit.get("author_ids", [])),
+                    "x_author_usernames": list(hit.get("author_usernames", [])),
+                    "x_mention_count": mention_count,
+                    "x_unique_author_count": int(hit.get("unique_author_count", 0) or 0),
+                },
+            )
         )
-        if candidate:
-            candidates.append(candidate)
-    return candidates
+
+    details["candidates_returned"] = len(candidates)
+    details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+    return candidates, details
 
 
 def scan_telegram_channels(limit: int = 40):
@@ -1200,7 +1404,7 @@ def collect_all_candidates(max_candidates: int = 200) -> Dict[str, object]:
         },
         {
             "source_name": "x_social",
-            "configured": bool(os.getenv("X_BEARER_TOKEN", "").strip() and os.getenv("X_SEARCH_TERMS", "").strip()),
+            "configured": True,
             "scanner_fn": scan_x_social,
             "scanner_kwargs": {"limit": max(30, max_candidates // 4)},
             "not_configured_message": "X scanner not configured.",

@@ -49,7 +49,7 @@ def run_scanner_shape_checks():
 
     original_env = {
         "X_BEARER_TOKEN": os.environ.get("X_BEARER_TOKEN"),
-        "X_SEARCH_TERMS": os.environ.get("X_SEARCH_TERMS"),
+        "X_ACCOUNTS": os.environ.get("X_ACCOUNTS"),
         "TELEGRAM_API_ID": os.environ.get("TELEGRAM_API_ID"),
         "TELEGRAM_API_HASH": os.environ.get("TELEGRAM_API_HASH"),
         "TELEGRAM_SESSION": os.environ.get("TELEGRAM_SESSION"),
@@ -58,7 +58,7 @@ def run_scanner_shape_checks():
     }
     try:
         os.environ.pop("X_BEARER_TOKEN", None)
-        os.environ.pop("X_SEARCH_TERMS", None)
+        os.environ.pop("X_ACCOUNTS", None)
         os.environ.pop("TELEGRAM_API_ID", None)
         os.environ.pop("TELEGRAM_API_HASH", None)
         os.environ.pop("TELEGRAM_SESSION", None)
