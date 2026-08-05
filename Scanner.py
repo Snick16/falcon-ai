@@ -5,6 +5,7 @@ from pathlib import Path
 
 from falcon_alerts import create_default_alert_engine
 from social_intelligence import SocialContext, create_default_social_engine
+from source_scanner import collect_all_candidates
 
 BOOSTS_URL = "https://api.dexscreener.com/token-boosts/latest/v1"
 TOKEN_URL = "https://api.dexscreener.com/tokens/v1/solana/{}"
@@ -845,10 +846,10 @@ def get_best_pair(pairs):
     )
 
 
-def scan_tokens(max_tokens=30, top_n=15):
+def scan_tokens(max_tokens=200, top_n=30):
     """
-    Scan boosted Solana tokens and return structured opportunities.
-    This keeps scoring logic unchanged and avoids printing-only output.
+    Scan multi-source Solana token candidates and return structured opportunities.
+    Existing scoring, alerting, and memory logic stays unchanged.
     """
     try:
         scanned_at = datetime.now(timezone.utc).isoformat()
@@ -866,26 +867,12 @@ def scan_tokens(max_tokens=30, top_n=15):
             if token.get("contract_address")
         }
 
-        boost_response = requests.get(BOOSTS_URL, timeout=15, verify=False)
-        boost_response.raise_for_status()
-        boosts = boost_response.json()
+        collection = collect_all_candidates(max_candidates=max_tokens)
+        candidates = collection.get("candidates", [])
+        scanner_status = collection.get("scanner_status", [])
+        scanner_elapsed_ms = int(collection.get("elapsed_ms", 0) or 0)
 
-        addresses = []
-        boost_amounts = {}
-
-        for token in boosts:
-            if token.get("chainId") != "solana":
-                continue
-
-            address = token.get("tokenAddress")
-            if address and address not in addresses:
-                addresses.append(address)
-                boost_amounts[address] = token.get("totalAmount", token.get("amount", 0))
-
-            if len(addresses) == max_tokens:
-                break
-
-        if not addresses:
+        if not candidates:
             alert_report = ALERT_ENGINE.process_scan([], scanned_at)
             record_disappeared_tokens(previous_tokens, [], scanned_at)
             save_snapshot(scanned_at, [])
@@ -895,37 +882,29 @@ def scan_tokens(max_tokens=30, top_n=15):
                 "scanned_at": scanned_at,
                 "opportunities_count": 0,
                 "highest_score": 0,
+                "new_tokens_detected": 0,
+                "scanner_status": scanner_status,
+                "scanner_elapsed_ms": scanner_elapsed_ms,
                 "tokens": [],
                 "alerts": alert_report.to_dict(),
             }
-
-        token_response = requests.get(
-            TOKEN_URL.format(",".join(addresses)),
-            timeout=20,
-            verify=False
-        )
-        token_response.raise_for_status()
-        all_pairs = token_response.json()
-
-        pairs_by_token = {}
-
-        for pair in all_pairs:
-            address = pair.get("baseToken", {}).get("address")
-            if address:
-                pairs_by_token.setdefault(address, []).append(pair)
 
         opportunities = []
         seen_contracts_in_scan = set()
         new_tokens_detected = []
 
-        for address in addresses:
-            token_pairs = pairs_by_token.get(address, [])
-            if not token_pairs:
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
                 continue
 
-            pair = get_best_pair(token_pairs)
+            pair = ((candidate.get("raw_data") or {}).get("pair") or {})
+            if not isinstance(pair, dict) or not pair:
+                continue
+
             base = pair.get("baseToken", {})
-            contract_address = str(base.get("address", "") or "").strip()
+            contract_address = str(candidate.get("token_address") or base.get("address", "") or "").strip()
+            if contract_address:
+                base["address"] = contract_address
             previous_token = previous_by_contract.get(contract_address)
             score, reasons = calculate_score(pair)
             risk_label = classify_risk(score, pair)
@@ -988,7 +967,7 @@ def scan_tokens(max_tokens=30, top_n=15):
                 SocialContext(
                     pair=pair,
                     previous_token=previous_token,
-                    boost_amount=boost_amounts.get(address, 0),
+                    boost_amount=safe_number((candidate.get("raw_data") or {}).get("boost_amount", 0)),
                     holder_count=intelligence.get("holder_count"),
                     scanned_at=scanned_at_dt,
                 )
@@ -1068,7 +1047,13 @@ def scan_tokens(max_tokens=30, top_n=15):
                 ),
                 "is_brand_new": is_brand_new,
                 "dexscreener_url": pair.get("url", ""),
-                "boost_amount": boost_amounts.get(address, 0),
+                "boost_amount": safe_number((candidate.get("raw_data") or {}).get("boost_amount", 0)),
+                "source": str(candidate.get("source", "unknown")),
+                "source_url": str(candidate.get("source_url", "")),
+                "source_names": list((candidate.get("raw_data") or {}).get("found_by", [candidate.get("source", "unknown")])),
+                "source_discovered_at": str(candidate.get("discovered_at", scanned_at)),
+                "source_pair_address": str(candidate.get("pair_address", "")),
+                "source_social_mentions": int(candidate.get("social_mentions", 0) or 0),
             }
             current_token.update(build_memory_delta(current_token, previous_token))
 
@@ -1104,6 +1089,9 @@ def scan_tokens(max_tokens=30, top_n=15):
             "opportunities_count": len(top_tokens),
             "highest_score": top_tokens[0]["score"] if top_tokens else 0,
             "new_tokens_detected": len(new_tokens_detected),
+            "scanner_status": scanner_status,
+            "scanner_elapsed_ms": scanner_elapsed_ms,
+            "candidates_rated": len(opportunities),
             "tokens": top_tokens,
             "alerts": alert_report.to_dict(),
         }
@@ -1116,6 +1104,8 @@ def scan_tokens(max_tokens=30, top_n=15):
             "opportunities_count": 0,
             "highest_score": 0,
             "new_tokens_detected": 0,
+            "scanner_status": [],
+            "scanner_elapsed_ms": 0,
             "tokens": [],
             "alerts": {
                 "enabled": ALERT_ENGINE.config.enabled,
@@ -1137,6 +1127,8 @@ def scan_tokens(max_tokens=30, top_n=15):
             "opportunities_count": 0,
             "highest_score": 0,
             "new_tokens_detected": 0,
+            "scanner_status": [],
+            "scanner_elapsed_ms": 0,
             "tokens": [],
             "alerts": {
                 "enabled": ALERT_ENGINE.config.enabled,

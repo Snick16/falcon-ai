@@ -905,6 +905,44 @@ def render_mobile_cards(tokens):
     st.markdown('<div class="mobile-cards">' + "".join(cards) + "</div>", unsafe_allow_html=True)
 
 
+def render_scanner_status(scanner_status, scanner_elapsed_ms):
+    if not scanner_status:
+        return
+
+    rows = []
+    for status in scanner_status:
+        source = html.escape(str(status.get("source", "unknown")))
+        configured = bool(status.get("configured", False))
+        success = bool(status.get("success", False))
+        found = to_int(status.get("candidates_found", 0))
+        elapsed = to_int(status.get("elapsed_ms", 0))
+        error = html.escape(str(status.get("error", "") or ""))
+        state = "OK" if success else "FAIL"
+        configured_label = "YES" if configured else "NO"
+        rows.append(
+            "<tr>"
+            f"<td>{source}</td>"
+            f"<td>{configured_label}</td>"
+            f"<td>{state}</td>"
+            f"<td>{found}</td>"
+            f"<td>{elapsed} ms</td>"
+            f"<td>{error}</td>"
+            "</tr>"
+        )
+
+    status_html = (
+        '<div class="desktop-table fal-table-wrap">'
+        '<div class="table-shell-title"><span>Scanner Status</span>'
+        f'<span class="right">Total {to_int(scanner_elapsed_ms)} ms</span></div>'
+        '<table class="falcon-table">'
+        '<thead><tr><th>Source</th><th>Configured</th><th>Result</th><th>Found</th><th>Elapsed</th><th>Error</th></tr></thead>'
+        '<tbody>'
+        + "".join(rows)
+        + '</tbody></table></div>'
+    )
+    st.markdown(status_html, unsafe_allow_html=True)
+
+
 inject_css()
 inject_copy_script()
 
@@ -991,6 +1029,8 @@ summary_html = f"""
 </div>
 """
 st.markdown(summary_html, unsafe_allow_html=True)
+
+render_scanner_status(payload.get("scanner_status", []), payload.get("scanner_elapsed_ms", 0))
 
 render_desktop_table(filtered_tokens)
 render_mobile_cards(filtered_tokens)
