@@ -856,11 +856,12 @@ def parse_x_posts(post_rows: Sequence[dict]) -> List[dict]:
 def scan_x_social(limit: int = 40):
     started = time.perf_counter()
     bearer = os.getenv("X_BEARER_TOKEN", "").strip()
-    accounts = _parse_csv_list(os.getenv("X_ACCOUNTS", "").strip())
+    accounts_raw = os.getenv("X_ACCOUNTS", "").strip()
+    accounts = _parse_csv_list(accounts_raw)
     api_url = os.getenv("X_API_URL", X_RECENT_SEARCH_URL).strip() or X_RECENT_SEARCH_URL
 
     details = {
-        "configured": True,
+        "configured": bool(bearer and accounts_raw),
         "accounts_requested": len(accounts),
         "posts_checked": 0,
         "contracts_detected": 0,
@@ -872,7 +873,7 @@ def scan_x_social(limit: int = 40):
     missing = []
     if not bearer:
         missing.append("X_BEARER_TOKEN")
-    if not accounts:
+    if not accounts_raw:
         missing.append("X_ACCOUNTS")
     if missing:
         details["configured"] = False

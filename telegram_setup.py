@@ -1,6 +1,4 @@
 import os
-import sys
-from getpass import getpass
 from pathlib import Path
 
 
@@ -28,7 +26,7 @@ def main() -> int:
         return 1
 
     try:
-        from telethon.errors import SessionPasswordNeededError  # noqa: PLC0415
+        from telethon.errors import FloodWaitError, SendCodeUnavailableError  # noqa: PLC0415
         from telethon.sessions import StringSession  # noqa: PLC0415
         from telethon.sync import TelegramClient  # noqa: PLC0415
     except Exception:
@@ -41,31 +39,31 @@ def main() -> int:
         return 1
 
     session_string = ""
-    with TelegramClient(StringSession(), api_id, api_hash) as client:
+    client = TelegramClient(StringSession(), api_id, api_hash)
+    try:
+        # Single authorization flow: this is the only login/authentication call.
+        client.start(phone=phone)
+
+        # Save immediately after successful start; do not trigger any additional auth calls.
+        session_string = StringSession.save(client.session) or ""
+    except FloodWaitError as error:
+        wait_seconds = int(getattr(error, "seconds", 0) or 0)
+        if wait_seconds > 0:
+            print(f"Telegram rate limit hit. Wait {wait_seconds} seconds before retrying.")
+        else:
+            print("Telegram rate limit hit. Wait before retrying.")
+        return 1
+    except SendCodeUnavailableError:
+        print("Telegram cannot send a login code right now. Wait before retrying; do not repeat attempts quickly.")
+        return 1
+    except Exception as error:
+        print(f"Telegram setup failed: {type(error).__name__}")
+        return 1
+    finally:
         try:
-            client.send_code_request(phone)
-            code = input("Enter the Telegram login code you received: ").strip()
-            if not code:
-                print("Login code is required.")
-                return 1
-
-            try:
-                client.sign_in(phone=phone, code=code)
-            except SessionPasswordNeededError:
-                password = getpass("Enter your Telegram 2FA password: ").strip()
-                if not password:
-                    print("2FA password is required.")
-                    return 1
-                client.sign_in(password=password)
-
-            if not client.is_user_authorized():
-                print("Authorization failed. Try again.")
-                return 1
-
-            session_string = client.session.save() or ""
-        except Exception as error:
-            print(f"Telegram setup failed: {type(error).__name__}")
-            return 1
+            client.disconnect()
+        except Exception:
+            pass
 
     if not session_string:
         print("Failed to create reusable session string.")
@@ -76,10 +74,12 @@ def main() -> int:
     out_path = out_dir / "telegram_session.txt"
     out_path.write_text(session_string, encoding="utf-8")
 
-    print("Session created successfully.")
+    print("Telegram session created successfully.")
+    print("WARNING: TELEGRAM_SESSION is a secret. Store it securely and do not share it.")
+    print("TELEGRAM_SESSION value:")
+    print(session_string)
     print(f"Saved reusable TELEGRAM_SESSION value to: {out_path}")
-    print("Copy that value into TELEGRAM_SESSION in your local .env or Render environment settings.")
-    print("This script does not print the session value to avoid exposing secrets.")
+    print("Copy this value into TELEGRAM_SESSION in your local .env or Render environment settings.")
     return 0
 
 

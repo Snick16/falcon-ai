@@ -1,6 +1,7 @@
 import unittest
+from unittest.mock import patch
 
-from source_scanner import parse_x_posts
+from source_scanner import parse_x_posts, scan_x_social
 
 
 class XParserTests(unittest.TestCase):
@@ -44,6 +45,23 @@ class XParserTests(unittest.TestCase):
         self.assertEqual(hit["mention_count"], 2)
         self.assertEqual(hit["unique_author_count"], 2)
         self.assertEqual(sorted(hit["author_usernames"]), ["alpha_calls", "beta_calls"])
+
+    def test_scan_x_social_is_configured_when_env_values_are_non_empty(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "X_BEARER_TOKEN": "bearer-token-present",
+                "X_ACCOUNTS": "alpha_calls,beta_calls",
+                "X_API_URL": "https://api.twitter.com/2/tweets/search/recent",
+            },
+            clear=False,
+        ):
+            with patch("source_scanner._request_json", return_value={"data": [], "includes": {"users": []}}):
+                candidates, details = scan_x_social(limit=20)
+
+        self.assertEqual(candidates, [])
+        self.assertTrue(details.get("configured"))
+        self.assertEqual(details.get("error_message"), "")
 
 
 if __name__ == "__main__":
