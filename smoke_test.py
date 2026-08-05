@@ -11,10 +11,12 @@ def run_compile_checks():
     py_compile.compile("Scanner.py", doraise=True)
     py_compile.compile("dashboard.py", doraise=True)
     py_compile.compile("source_scanner.py", doraise=True)
+    py_compile.compile("whale_scanner.py", doraise=True)
 
 
 def run_scanner_shape_checks():
     from source_scanner import collect_all_candidates, scan_dexscreener_latest  # noqa: PLC0415
+    from whale_scanner import scan_whale_wallets  # noqa: PLC0415
 
     latest = scan_dexscreener_latest(limit=5)
     assert_true(isinstance(latest, list), "scan_dexscreener_latest should return a list")
@@ -101,6 +103,28 @@ def run_scanner_shape_checks():
         )
     finally:
         for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    whale_original_env = {
+        "HELIUS_API_KEY": os.environ.get("HELIUS_API_KEY"),
+        "WHALE_WALLETS": os.environ.get("WHALE_WALLETS"),
+    }
+    try:
+        os.environ.pop("HELIUS_API_KEY", None)
+        os.environ.pop("WHALE_WALLETS", None)
+        whale_signals, whale_details = scan_whale_wallets(limit_wallets=5)
+        assert_true(isinstance(whale_signals, dict), "whale scanner should return a dict for signals")
+        assert_true(isinstance(whale_details, dict), "whale scanner should return details dict")
+        assert_true(whale_details.get("configured") is False, "whale scanner should be not configured without env")
+        assert_true(
+            "not configured" in str(whale_details.get("error_message", "")).lower(),
+            "whale scanner should provide safe not-configured message",
+        )
+    finally:
+        for key, value in whale_original_env.items():
             if value is None:
                 os.environ.pop(key, None)
             else:

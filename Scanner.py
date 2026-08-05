@@ -7,6 +7,7 @@ from pathlib import Path
 from falcon_alerts import create_default_alert_engine
 from social_intelligence import SocialContext, create_default_social_engine
 from source_scanner import collect_all_candidates
+from whale_scanner import scan_whale_wallets
 
 BOOSTS_URL = "https://api.dexscreener.com/token-boosts/latest/v1"
 TOKEN_URL = "https://api.dexscreener.com/tokens/v1/solana/{}"
@@ -17,6 +18,7 @@ DISAPPEARED_HISTORY_FILE = MEMORY_DIR / "disappeared_history.jsonl"
 SCANNED_CONTRACTS_FILE = MEMORY_DIR / "scanned_contracts.json"
 SMART_WALLET_TRACKER_FILE = MEMORY_DIR / "smart_wallet_tracker.json"
 FIRST_SEEN_CONTRACTS_FILE = MEMORY_DIR / "first_seen_contracts.json"
+WHALE_EVIDENCE_IDS_FILE = MEMORY_DIR / "whale_evidence_ids.json"
 MAX_SNAPSHOTS = 500
 SOCIAL_ENGINE = create_default_social_engine()
 ALERT_ENGINE = create_default_alert_engine()
@@ -117,6 +119,42 @@ def save_first_seen_contracts(first_seen_by_contract):
     }
     with FIRST_SEEN_CONTRACTS_FILE.open("w", encoding="utf-8") as handle:
         json.dump(dict(sorted(serialized.items())), handle, ensure_ascii=True)
+
+
+def load_whale_evidence_ids():
+    """Load persistent whale evidence ids to avoid counting same proof twice."""
+    ensure_memory_dirs()
+    if not WHALE_EVIDENCE_IDS_FILE.exists():
+        return set()
+
+    try:
+        with WHALE_EVIDENCE_IDS_FILE.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return set()
+
+    if not isinstance(raw, list):
+        return set()
+
+    return {
+        str(item).strip()
+        for item in raw
+        if str(item).strip()
+    }
+
+
+def save_whale_evidence_ids(evidence_ids):
+    """Persist whale evidence ids seen by Scanner integration."""
+    ensure_memory_dirs()
+    serialized = sorted(
+        {
+            str(item).strip()
+            for item in (evidence_ids or set())
+            if str(item).strip()
+        }
+    )
+    with WHALE_EVIDENCE_IDS_FILE.open("w", encoding="utf-8") as handle:
+        json.dump(serialized, handle, ensure_ascii=True)
 
 
 def parse_iso_datetime(value):
@@ -1081,6 +1119,22 @@ def scan_tokens(max_tokens=200, top_n=30):
         candidates = collection.get("candidates", [])
         scanner_status = collection.get("scanner_status", [])
         scanner_elapsed_ms = int(collection.get("elapsed_ms", 0) or 0)
+        whale_signals, whale_details = scan_whale_wallets(limit_wallets=20)
+        whale_details = whale_details if isinstance(whale_details, dict) else {}
+        whale_status = {
+            "source": "whale_wallets",
+            "configured": bool(whale_details.get("configured", False)),
+            "success": bool(whale_details.get("success", True)),
+            "candidates_found": int(whale_details.get("contracts_detected", 0) or 0),
+            "elapsed_ms": int(whale_details.get("elapsed_ms", 0) or 0),
+            "error": str(whale_details.get("error_message", "") or ""),
+            "details": whale_details,
+        }
+        if isinstance(scanner_status, list):
+            scanner_status.append(whale_status)
+        scanner_elapsed_ms += int(whale_details.get("elapsed_ms", 0) or 0)
+        whale_signals = whale_signals if isinstance(whale_signals, dict) else {}
+        seen_whale_evidence_ids = load_whale_evidence_ids()
 
         if not candidates:
             alert_report = ALERT_ENGINE.process_scan([], scanned_at)
@@ -1138,7 +1192,33 @@ def scan_tokens(max_tokens=200, top_n=30):
                 scanned_at_dt,
                 window_minutes=10,
             )
-            combined_wallet_count = recent_wallet_count + estimated_wallet_count
+            whale_signal = whale_signals.get(contract_address, {}) if isinstance(whale_signals, dict) else {}
+            whale_evidence_rows = whale_signal.get("evidence", []) if isinstance(whale_signal, dict) else []
+            new_whale_evidence = []
+            if isinstance(whale_evidence_rows, list):
+                for row in whale_evidence_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    evidence_id = str(row.get("evidence_id", "") or "").strip()
+                    if not evidence_id or evidence_id in seen_whale_evidence_ids:
+                        continue
+                    seen_whale_evidence_ids.add(evidence_id)
+                    new_whale_evidence.append(row)
+
+            confirmed_whale_wallets = sorted(
+                {
+                    str(row.get("wallet", "") or "").strip()
+                    for row in new_whale_evidence
+                    if str(row.get("wallet", "") or "").strip()
+                }
+            )
+            confirmed_whale_count = len(confirmed_whale_wallets)
+            if confirmed_whale_count > 0:
+                smart_wallet_reasons = list(smart_wallet_reasons) + [
+                    f"confirmed whale buys from {confirmed_whale_count} configured wallet(s)"
+                ]
+
+            combined_wallet_count = recent_wallet_count + estimated_wallet_count + confirmed_whale_count
 
             score, breakdown_lines, breakdown = calculate_score(
                 pair,
@@ -1152,7 +1232,7 @@ def scan_tokens(max_tokens=200, top_n=30):
                 smart_wallet_tracker,
                 contract_address,
                 scanned_at,
-                estimated_wallet_count,
+                estimated_wallet_count + confirmed_whale_count,
             )
 
             momentum = classify_momentum(price_change_5m_pct, buys_5m, sells_5m)
@@ -1253,6 +1333,10 @@ def scan_tokens(max_tokens=200, top_n=30):
                 "smart_wallet_display": get_smart_wallet_display(combined_wallet_count),
                 "smart_wallet_high": smart_wallet_high,
                 "smart_wallet_reasons": smart_wallet_reasons,
+                "whale_confirmed_buy_count": int((whale_signal or {}).get("buy_count", 0) or 0),
+                "whale_wallets": confirmed_whale_wallets,
+                "whale_last_buy_at": str((whale_signal or {}).get("last_buy_at", "") or ""),
+                "whale_new_evidence_count": len(new_whale_evidence),
                 "social_heat_score": social_intelligence.get("social_heat_score", 0),
                 "social_heat_label": social_intelligence.get("social_heat_label", "QUIET"),
                 "social_heat": social_intelligence.get("social_heat_badge", "⚪ QUIET"),
@@ -1298,6 +1382,7 @@ def scan_tokens(max_tokens=200, top_n=30):
         if seen_contracts_in_scan:
             save_seen_contracts(seen_contracts.union(seen_contracts_in_scan))
         save_first_seen_contracts(first_seen_by_contract)
+        save_whale_evidence_ids(seen_whale_evidence_ids)
         save_smart_wallet_tracker(smart_wallet_tracker)
 
         for token in new_tokens_detected:
