@@ -13,6 +13,7 @@ DEX_BOOSTS_TOP_URL = "https://api.dexscreener.com/token-boosts/top/v1"
 DEX_TOKEN_PROFILES_LATEST_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEX_TOKEN_BATCH_URL = "https://api.dexscreener.com/tokens/v1/solana/{}"
 DEX_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search"
+PUMPFUN_RECENT_COINS_URL = "https://frontend-api-v3.pump.fun/coins"
 
 SOLANA_CHAIN_ID = "solana"
 SOLANA_ADDRESS_RE = re.compile(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b")
@@ -75,12 +76,27 @@ class SourceScanError(RuntimeError):
 def _to_utc_datetime(value) -> Optional[datetime]:
     if not value:
         return None
+    if isinstance(value, (int, float)):
+        epoch_value = float(value)
+        if epoch_value > 10_000_000_000:
+            epoch_value = epoch_value / 1000.0
+        try:
+            return datetime.fromtimestamp(epoch_value, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
     if isinstance(value, datetime):
         parsed = value
     else:
         raw = str(value).strip()
         if not raw:
             return None
+        try:
+            numeric = float(raw)
+            if numeric > 10_000_000_000:
+                numeric = numeric / 1000.0
+            return datetime.fromtimestamp(numeric, tz=timezone.utc)
+        except (TypeError, ValueError, OverflowError, OSError):
+            pass
         try:
             parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         except ValueError:
@@ -556,56 +572,180 @@ def scan_new_solana_pairs(limit: int = 80) -> List[TokenCandidate]:
     return candidates
 
 
-def scan_pumpfun_tokens(limit: int = 50) -> List[TokenCandidate]:
-    if not _bool_env("PUMPFUN_ENABLED", False):
-        return []
+def parse_pumpfun_payload(payload, lookback_minutes: int = 60, max_tokens: int = 50) -> List[dict]:
+    now_dt = datetime.now(timezone.utc)
+    cutoff = now_dt - timedelta(minutes=max(1, int(lookback_minutes or 60)))
 
-    api_url = os.getenv("PUMPFUN_API_URL", "").strip()
-    if not api_url:
-        return []
-
-    headers = {}
-    api_key = os.getenv("PUMPFUN_API_KEY", "").strip()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    payload = _request_json(api_url, headers=headers, timeout=12, retries=1)
     if isinstance(payload, dict):
-        items = payload.get("tokens") or payload.get("items") or payload.get("data") or []
+        items = payload.get("coins") or payload.get("data") or payload.get("tokens") or payload.get("items") or []
     elif isinstance(payload, list):
         items = payload
     else:
         items = []
 
-    token_addresses: List[str] = []
+    normalized_rows = []
+    seen = set()
+
     for item in items:
         if not isinstance(item, dict):
             continue
-        token_address = _normalize_address(item.get("tokenAddress") or item.get("mint") or item.get("address"))
-        if token_address:
-            token_addresses.append(token_address)
-        if len(token_addresses) >= max(1, limit):
-            break
 
-    if not token_addresses:
-        return []
+        mint = _normalize_address(item.get("mint") or item.get("tokenAddress") or item.get("address"))
+        if not mint:
+            continue
+        if not SOLANA_ADDRESS_RE.fullmatch(mint):
+            continue
 
-    pairs_by_token = _fetch_pairs_for_token_addresses(token_addresses)
+        created_dt = _to_utc_datetime(
+            item.get("created_timestamp")
+            or item.get("createdAt")
+            or item.get("created_at")
+            or item.get("timestamp")
+        )
+        if created_dt and created_dt < cutoff:
+            continue
+
+        if mint in seen:
+            continue
+        seen.add(mint)
+
+        symbol = str(item.get("symbol", "UNKNOWN") or "UNKNOWN")
+        name = str(item.get("name", "Unknown") or "Unknown")
+        normalized_rows.append(
+            {
+                "mint": mint,
+                "symbol": symbol,
+                "name": name,
+                "created_at": created_dt.isoformat() if created_dt else "",
+                "raw": item,
+            }
+        )
+
+    normalized_rows.sort(key=lambda row: row.get("created_at", ""), reverse=True)
+    return normalized_rows[:max(1, int(max_tokens or 50))]
+
+
+def scan_pumpfun_tokens(limit: int = 50):
+    started = time.perf_counter()
+    enabled = _bool_env("PUMPFUN_ENABLED", False)
+    max_tokens_cfg = _parse_int_env("PUMPFUN_MAX_TOKENS", default=50, minimum=1, maximum=300)
+    lookback_minutes = _parse_int_env("PUMPFUN_LOOKBACK_MINUTES", default=60, minimum=1, maximum=24 * 60)
+    requested_limit = max(1, int(limit or 1))
+    effective_limit = min(requested_limit, max_tokens_cfg)
+
+    details = {
+        "configured": bool(enabled),
+        "source_url": PUMPFUN_RECENT_COINS_URL,
+        "max_tokens": max_tokens_cfg,
+        "lookback_minutes": lookback_minutes,
+        "mints_detected": 0,
+        "candidates_returned": 0,
+        "elapsed_ms": 0,
+        "error_message": "",
+    }
+
+    if not enabled:
+        details["configured"] = False
+        details["error_message"] = "Pump.fun scanner not configured: set PUMPFUN_ENABLED=true."
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    try:
+        payload = _request_json(
+            PUMPFUN_RECENT_COINS_URL,
+            params={
+                "offset": 0,
+                "limit": effective_limit,
+                "sort": "created_timestamp",
+                "order": "DESC",
+                "includeNsfw": "false",
+            },
+            timeout=12,
+            retries=1,
+        )
+    except Exception:
+        details["error_message"] = "Pump.fun public endpoint unavailable."
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    parsed_rows = parse_pumpfun_payload(
+        payload,
+        lookback_minutes=lookback_minutes,
+        max_tokens=effective_limit,
+    )
+    details["mints_detected"] = len(parsed_rows)
+
+    if not parsed_rows:
+        details["error_message"] = "No recent Pump.fun mints found in lookback window."
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    addresses = [row.get("mint", "") for row in parsed_rows if row.get("mint")]
+    pairs_by_token = _fetch_pairs_for_token_addresses(addresses)
+    rows_by_address = {
+        row.get("mint", ""): row
+        for row in parsed_rows
+        if row.get("mint")
+    }
+
     candidates: List[TokenCandidate] = []
     discovered_at = _utc_now_iso()
-    for token_address in token_addresses:
+    for token_address in addresses:
+        row = rows_by_address.get(token_address, {})
         pair = _best_pair(pairs_by_token.get(token_address, []))
-        if not pair:
+
+        if pair:
+            candidate = _build_candidate_from_pair(
+                pair,
+                source="pumpfun_tokens",
+                source_url=str(pair.get("url", "") or PUMPFUN_RECENT_COINS_URL),
+                discovered_at=discovered_at,
+                extra_raw={
+                    "pumpfun": row.get("raw", {}),
+                    "pumpfun_created_at": row.get("created_at", ""),
+                },
+            )
+            if candidate:
+                if row.get("symbol") not in (None, "", "UNKNOWN"):
+                    candidate.symbol = str(row.get("symbol"))
+                if row.get("name") not in (None, "", "Unknown"):
+                    candidate.name = str(row.get("name"))
+                candidates.append(candidate)
             continue
-        candidate = _build_candidate_from_pair(
-            pair,
-            source="pumpfun_tokens",
-            source_url=str(pair.get("url", "") or api_url),
-            discovered_at=discovered_at,
+
+        candidates.append(
+            TokenCandidate(
+                chain=SOLANA_CHAIN_ID,
+                token_address=token_address,
+                symbol=str(row.get("symbol", "UNKNOWN") or "UNKNOWN"),
+                name=str(row.get("name", "Unknown") or "Unknown"),
+                source="pumpfun_tokens",
+                source_url=PUMPFUN_RECENT_COINS_URL,
+                pair_address="",
+                discovered_at=discovered_at,
+                market_cap=0.0,
+                liquidity=0.0,
+                volume_5m=0.0,
+                volume_1h=0.0,
+                volume_24h=0.0,
+                price_change_5m=0.0,
+                price_change_1h=0.0,
+                buys_5m=0,
+                sells_5m=0,
+                token_age_minutes=0.0,
+                social_mentions=0,
+                raw_data={
+                    "pair": {},
+                    "found_by": ["pumpfun_tokens"],
+                    "pumpfun": row.get("raw", {}),
+                    "pumpfun_created_at": row.get("created_at", ""),
+                },
+            )
         )
-        if candidate:
-            candidates.append(candidate)
-    return candidates
+
+    details["candidates_returned"] = len(candidates)
+    details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+    return candidates, details
 
 
 def _extract_solana_addresses_from_text(text: str) -> List[str]:
@@ -1046,7 +1186,7 @@ def collect_all_candidates(max_candidates: int = 200) -> Dict[str, object]:
         },
         {
             "source_name": "pumpfun_tokens",
-            "configured": _bool_env("PUMPFUN_ENABLED", False),
+            "configured": True,
             "scanner_fn": scan_pumpfun_tokens,
             "scanner_kwargs": {"limit": max(30, max_candidates // 4)},
             "not_configured_message": "Pump.fun scanner not configured.",
