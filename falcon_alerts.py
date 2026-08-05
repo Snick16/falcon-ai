@@ -94,6 +94,39 @@ def _format_money(value) -> str:
     return f"${num:.0f}"
 
 
+def _format_first_seen(value: Optional[str]) -> str:
+    parsed = _parse_iso_datetime(value)
+    if not parsed:
+        return "N/A"
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _format_source_triggers(token: Dict[str, object]) -> Tuple[str, str]:
+    breakdown = token.get("score_breakdown", {})
+    if not isinstance(breakdown, dict):
+        breakdown = {}
+
+    ordered_sources = [
+        ("Pump.fun", "pump"),
+        ("Telegram", "telegram"),
+        ("X", "x"),
+        ("Dex", "dex"),
+        ("Smart", "smart"),
+    ]
+
+    scored = []
+    triggered = []
+    for label, key in ordered_sources:
+        points = _to_int(breakdown.get(key, 0))
+        scored.append(f"{label}:{points}")
+        if points > 0:
+            triggered.append(label)
+
+    triggered_text = ", ".join(triggered) if triggered else "None"
+    score_text = " | ".join(scored)
+    return triggered_text, score_text
+
+
 @dataclass
 class AlertConfig:
     enabled: bool = False
@@ -204,27 +237,12 @@ class FalconAlertEngine:
 
     def _evaluate_requirements(self, token: Dict[str, object]) -> Tuple[bool, List[str], List[str]]:
         score = _to_int(token.get("score"))
-        confidence = _to_int(token.get("confidence"))
-        liquidity = _to_float(token.get("liquidity_usd"))
-        momentum = str(token.get("momentum", "NEUTRAL")).upper()
-        risk_label = str(token.get("risk_label", "HIGH")).upper()
-        buys_5m = _to_int(token.get("buys_5m"))
-        sells_5m = _to_int(token.get("sells_5m"))
-        price_5m = _to_float(token.get("price_change_5m_pct"))
-        ratio = self._buy_sell_ratio(buys_5m, sells_5m)
 
         passes = []
         failures = []
 
         checks = [
             (score >= self.config.min_score, f"Falcon Score {score} >= {self.config.min_score}", f"score {score} < {self.config.min_score}"),
-            (confidence >= self.config.min_confidence, f"Confidence {confidence} >= {self.config.min_confidence}", f"confidence {confidence} < {self.config.min_confidence}"),
-            (liquidity >= self.config.min_liquidity_usd, f"Liquidity {_format_money(liquidity)} >= {_format_money(self.config.min_liquidity_usd)}", f"liquidity {_format_money(liquidity)} < {_format_money(self.config.min_liquidity_usd)}"),
-            (momentum in self.config.allowed_momentum, f"Momentum {momentum} is allowed", f"momentum {momentum} not in {','.join(self.config.allowed_momentum)}"),
-            (price_5m >= self.config.min_price_change_5m_pct, f"5m change {price_5m:+.2f}% >= {self.config.min_price_change_5m_pct:+.2f}%", f"5m change {price_5m:+.2f}% < {self.config.min_price_change_5m_pct:+.2f}%"),
-            (ratio >= self.config.min_buy_sell_ratio, f"Buy/Sell pressure {ratio:.2f}x >= {self.config.min_buy_sell_ratio:.2f}x", f"buy/sell pressure {ratio:.2f}x < {self.config.min_buy_sell_ratio:.2f}x"),
-            (buys_5m >= self.config.min_buys_5m, f"Buys {buys_5m} >= {self.config.min_buys_5m}", f"buys {buys_5m} < {self.config.min_buys_5m}"),
-            (self._risk_rank(risk_label) <= self.config.max_risk_rank, f"Risk {risk_label} accepted", f"risk {risk_label} exceeds configured max"),
         ]
 
         for ok, pass_reason, fail_reason in checks:
@@ -240,24 +258,13 @@ class FalconAlertEngine:
         symbol = str(token.get("token_symbol", "UNKNOWN"))
         contract = str(token.get("contract_address", "N/A"))
         score = _to_int(token.get("score"))
-        signal = str(token.get("signal", "PASS"))
-        conviction = str(token.get("conviction_rating", "WATCH"))
-        risk = str(token.get("risk_label", "HIGH"))
+        confidence = _to_int(token.get("confidence"))
+        confidence_tier = str(token.get("confidence_tier", "LOW"))
         market_cap = _format_money(token.get("market_cap_usd"))
         liquidity = _format_money(token.get("liquidity_usd"))
-        price_5m = _to_float(token.get("price_change_5m_pct"))
-        buys_5m = _to_int(token.get("buys_5m"))
-        sells_5m = _to_int(token.get("sells_5m"))
-        smart_wallet_count = _to_int(token.get("smart_wallet_count"))
-        social_heat = str(token.get("social_heat", "⚪ QUIET"))
-        pair_age = token.get("pair_age_minutes")
-        age_display = "N/A"
-        if pair_age is not None:
-            age_value = _to_float(pair_age)
-            if age_value >= 60:
-                age_display = f"{age_value / 60:.1f}h"
-            else:
-                age_display = f"{age_value:.0f}m"
+        first_seen_display = _format_first_seen(token.get("first_seen_at"))
+        first_seen_ago = str(token.get("first_seen_ago", "") or "N/A")
+        triggered_sources, source_points = _format_source_triggers(token)
 
         base_reasons = token.get("signal_reasons", []) or []
         if isinstance(base_reasons, list):
@@ -275,21 +282,18 @@ class FalconAlertEngine:
         chart_url = str(token.get("dexscreener_url", "") or "N/A")
 
         return (
-            "FALCON HIGH PRIORITY OPPORTUNITY ALERT\n\n"
+            "FALCON BUY NOW ALERT\n\n"
             f"Token: {name} ({symbol})\n"
-            f"Signal: {signal} | Falcon Score: {score}/100\n"
-            f"Conviction: {conviction} | Risk: {risk}\n"
             f"Contract: {contract}\n"
+            f"Falcon Rating: {score}/100\n"
+            f"Confidence: {confidence_tier} ({confidence})\n"
             f"Market Cap: {market_cap} | Liquidity: {liquidity}\n"
-            f"5m Change: {price_5m:+.2f}%\n"
-            f"Buys vs Sells (5m): {buys_5m}/{sells_5m}\n"
-            f"Smart Wallet Count: {smart_wallet_count}\n"
-            f"Social Heat: {social_heat}\n"
-            f"Token Age: {age_display}\n\n"
+            f"First Seen: {first_seen_display} ({first_seen_ago})\n"
+            f"Triggered Sources: {triggered_sources}\n"
+            f"Source Points: {source_points}\n\n"
             "Main Reasons:\n"
             f"{reason_lines}\n\n"
-            f"DexScreener: {chart_url}\n\n"
-            "Warning: high-risk opportunity, not financial advice."
+            f"DexScreener: {chart_url}"
         )
 
     def _send_telegram(self, message: str) -> bool:

@@ -1,5 +1,6 @@
 import requests
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,9 +16,21 @@ SNAPSHOTS_DIR = MEMORY_DIR / "snapshots"
 DISAPPEARED_HISTORY_FILE = MEMORY_DIR / "disappeared_history.jsonl"
 SCANNED_CONTRACTS_FILE = MEMORY_DIR / "scanned_contracts.json"
 SMART_WALLET_TRACKER_FILE = MEMORY_DIR / "smart_wallet_tracker.json"
+FIRST_SEEN_CONTRACTS_FILE = MEMORY_DIR / "first_seen_contracts.json"
 MAX_SNAPSHOTS = 500
 SOCIAL_ENGINE = create_default_social_engine()
 ALERT_ENGINE = create_default_alert_engine()
+
+DEFAULT_SOURCE_TRUST_WEIGHTS = {
+    "DexScreener": 5,
+    "Pump.fun": 7,
+    "X": 6,
+    "Telegram": 6,
+    "GMGN": 8,
+    "TrojanOnSolana": 7,
+    "solanakingcalls": 7,
+    "Bonk": 5,
+}
 
 
 def safe_number(value):
@@ -69,6 +82,43 @@ def save_seen_contracts(contracts):
         json.dump(serialized, handle, ensure_ascii=True)
 
 
+def load_first_seen_contracts():
+    """Load first-seen timestamps keyed by contract address."""
+    ensure_memory_dirs()
+    if not FIRST_SEEN_CONTRACTS_FILE.exists():
+        return {}
+
+    try:
+        with FIRST_SEEN_CONTRACTS_FILE.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    if not isinstance(raw, dict):
+        return {}
+
+    normalized = {}
+    for contract, first_seen in raw.items():
+        key = str(contract or "").strip()
+        value = str(first_seen or "").strip()
+        if not key or not value:
+            continue
+        normalized[key] = value
+    return normalized
+
+
+def save_first_seen_contracts(first_seen_by_contract):
+    """Persist first-seen timestamps for detected contracts."""
+    ensure_memory_dirs()
+    serialized = {
+        str(contract).strip(): str(first_seen).strip()
+        for contract, first_seen in (first_seen_by_contract or {}).items()
+        if str(contract).strip() and str(first_seen).strip()
+    }
+    with FIRST_SEEN_CONTRACTS_FILE.open("w", encoding="utf-8") as handle:
+        json.dump(dict(sorted(serialized.items())), handle, ensure_ascii=True)
+
+
 def parse_iso_datetime(value):
     """Parse an ISO datetime string safely."""
     if not value:
@@ -80,6 +130,141 @@ def parse_iso_datetime(value):
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _normalize_trust_key(value):
+    return str(value or "").strip().lower().lstrip("@")
+
+
+def load_source_trust_weights():
+    """Load trust weights from safe defaults with optional JSON env override."""
+    weights = {
+        _normalize_trust_key(name): int(value)
+        for name, value in DEFAULT_SOURCE_TRUST_WEIGHTS.items()
+    }
+
+    raw = os.getenv("SOURCE_TRUST_WEIGHTS", "").strip()
+    if not raw:
+        return weights
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return weights
+
+    if not isinstance(parsed, dict):
+        return weights
+
+    for key, value in parsed.items():
+        normalized_key = _normalize_trust_key(key)
+        if not normalized_key:
+            continue
+        try:
+            numeric = int(float(value))
+        except (TypeError, ValueError):
+            continue
+        weights[normalized_key] = max(0, min(numeric, 20))
+
+    return weights
+
+
+def collect_unique_source_evidence(candidate, smart_wallet_count=0):
+    """Collect unique source/channel/account evidence keys for trust scoring."""
+    raw_data = (candidate or {}).get("raw_data", {}) if isinstance(candidate, dict) else {}
+    found_by = raw_data.get("found_by", []) if isinstance(raw_data.get("found_by"), list) else []
+
+    evidence_keys = set()
+
+    found_by_set = {str(item or "").strip() for item in found_by if str(item or "").strip()}
+    if found_by_set.intersection({"dexscreener_latest", "dexscreener_boosted", "dexscreener_trending", "new_solana_pairs"}):
+        evidence_keys.add(_normalize_trust_key("DexScreener"))
+    if "pumpfun_tokens" in found_by_set:
+        evidence_keys.add(_normalize_trust_key("Pump.fun"))
+    if "x_social" in found_by_set:
+        evidence_keys.add(_normalize_trust_key("X"))
+    if "telegram_channels" in found_by_set:
+        evidence_keys.add(_normalize_trust_key("Telegram"))
+
+    telegram_channels = raw_data.get("telegram_channels", [])
+    if isinstance(telegram_channels, list):
+        for channel in telegram_channels:
+            normalized = _normalize_trust_key(channel)
+            if normalized:
+                evidence_keys.add(normalized)
+
+    x_authors = raw_data.get("x_author_usernames", [])
+    if isinstance(x_authors, list):
+        for author in x_authors:
+            normalized = _normalize_trust_key(author)
+            if normalized:
+                evidence_keys.add(normalized)
+
+    if int(smart_wallet_count or 0) > 0:
+        evidence_keys.add(_normalize_trust_key("Smart"))
+
+    return evidence_keys
+
+
+def calculate_source_trust_bonus(candidate, smart_wallet_count=0, score_before_trust=0):
+    """Apply modest trust bonus from unique sources/channels/accounts."""
+    weights = load_source_trust_weights()
+    evidence_keys = collect_unique_source_evidence(candidate, smart_wallet_count)
+    evidence_with_weights = {
+        key: int(weights.get(key, 0))
+        for key in evidence_keys
+        if key in weights
+    }
+
+    if not evidence_with_weights:
+        return 0, [], {}
+
+    # Treat weight 5 as neutral; only incremental trust above neutral adds score.
+    raw_bonus = sum(max(0, value - 5) for value in evidence_with_weights.values())
+    trust_bonus = min(8, raw_bonus)
+
+    if len(evidence_with_weights) <= 1:
+        trust_bonus = min(trust_bonus, 4)
+        if int(score_before_trust or 0) < 90:
+            trust_bonus = min(trust_bonus, max(0, 89 - int(score_before_trust or 0)))
+
+    evidence_labels = sorted(evidence_with_weights.keys())
+    return int(trust_bonus), evidence_labels, evidence_with_weights
+
+
+def format_elapsed_since(earlier_dt, later_dt):
+    """Format elapsed time between two UTC datetimes for dashboard labels."""
+    if earlier_dt is None or later_dt is None:
+        return "N/A"
+    delta_seconds = max(0, int((later_dt - earlier_dt).total_seconds()))
+    if delta_seconds < 60:
+        return f"{delta_seconds}s ago"
+
+    minutes = delta_seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+
+    hours = minutes // 60
+    remainder_minutes = minutes % 60
+    if hours < 24:
+        if remainder_minutes == 0:
+            return f"{hours}h ago"
+        return f"{hours}h {remainder_minutes}m ago"
+
+    days = hours // 24
+    remainder_hours = hours % 24
+    if remainder_hours == 0:
+        return f"{days}d ago"
+    return f"{days}d {remainder_hours}h ago"
+
+
+def get_or_set_first_seen(first_seen_by_contract, contract_address, scanned_at):
+    """Return existing first-seen timestamp or set it once if missing/invalid."""
+    existing = str((first_seen_by_contract or {}).get(contract_address, "") or "").strip()
+    if parse_iso_datetime(existing) is not None:
+        return existing
+
+    first_seen_by_contract[contract_address] = scanned_at
+    return scanned_at
 
 
 def load_smart_wallet_tracker():
@@ -338,152 +523,166 @@ def build_memory_delta(current_token, previous_token):
     }
 
 
-def calculate_score(pair):
-    """Create a momentum/liquidity score from 0 to 100 with clear reasons."""
-    score = 0
-    reasons = []
+def _calculate_pumpfun_points(candidate, pair):
+    raw_data = (candidate or {}).get("raw_data", {}) if isinstance(candidate, dict) else {}
+    found_by = set(raw_data.get("found_by", [])) if isinstance(raw_data.get("found_by", []), list) else set()
+    if "pumpfun_tokens" not in found_by:
+        return 0
 
+    discovered_dt = parse_iso_datetime(raw_data.get("pumpfun_created_at"))
+    if discovered_dt is None:
+        discovered_dt = parse_iso_datetime((candidate or {}).get("discovered_at"))
+    age_minutes = None
+    if discovered_dt is not None:
+        age_minutes = max(0.0, (datetime.now(timezone.utc) - discovered_dt).total_seconds() / 60.0)
+    if age_minutes is None:
+        age_minutes = get_pair_age_minutes(pair)
+
+    if age_minutes is None:
+        return 18
+    if age_minutes <= 15:
+        return 30
+    if age_minutes <= 60:
+        return 24
+    if age_minutes <= 180:
+        return 18
+    return 10
+
+
+def _calculate_telegram_points(candidate):
+    raw_data = (candidate or {}).get("raw_data", {}) if isinstance(candidate, dict) else {}
+    message_count = len(raw_data.get("telegram_messages", [])) if isinstance(raw_data.get("telegram_messages", []), list) else 0
+    channel_count = len(raw_data.get("telegram_channels", [])) if isinstance(raw_data.get("telegram_channels", []), list) else 0
+    return min(25, (message_count * 6) + (channel_count * 4))
+
+
+def _calculate_x_points(candidate):
+    raw_data = (candidate or {}).get("raw_data", {}) if isinstance(candidate, dict) else {}
+    mention_count = int(raw_data.get("x_mention_count", 0) or 0)
+    unique_author_count = int(raw_data.get("x_unique_author_count", 0) or 0)
+    return min(20, (mention_count * 4) + (unique_author_count * 4))
+
+
+def _calculate_dex_activity_points(pair):
     liquidity = safe_number(pair.get("liquidity", {}).get("usd"))
-    market_cap = safe_number(pair.get("marketCap") or pair.get("fdv"))
-    volume_1h = safe_number(pair.get("volume", {}).get("h1"))
     volume_5m = safe_number(pair.get("volume", {}).get("m5"))
     price_5m = safe_number(pair.get("priceChange", {}).get("m5"))
-    price_1h = safe_number(pair.get("priceChange", {}).get("h1"))
-
     transactions = pair.get("txns", {}).get("m5", {})
     buys_5m = int(transactions.get("buys", 0) or 0)
     sells_5m = int(transactions.get("sells", 0) or 0)
     total_txns_5m = buys_5m + sells_5m
-    liq_to_mcap = (liquidity / market_cap) if market_cap > 0 else 0.0
 
-    if liquidity <= 1_000:
-        score -= 25
-        reasons.append("near-zero liquidity")
-    elif liquidity < 10_000:
-        score -= 14
-        reasons.append("very low liquidity")
-    elif liquidity >= 150_000:
-        score += 18
-        reasons.append("strong liquidity base")
-    elif liquidity >= 75_000:
-        score += 12
-        reasons.append("healthy liquidity")
-    elif liquidity >= 30_000:
-        score += 6
-        reasons.append("adequate liquidity")
-
-    if market_cap > 0:
-        if liq_to_mcap >= 0.20:
-            score += 14
-            reasons.append("excellent liquidity depth versus market cap")
-        elif liq_to_mcap >= 0.10:
-            score += 9
-            reasons.append("good liquidity depth versus market cap")
-        elif liq_to_mcap >= 0.05:
-            score += 4
-            reasons.append("acceptable liquidity depth versus market cap")
-        else:
-            score -= 10
-            reasons.append("weak liquidity depth versus market cap")
-    else:
-        reasons.append("market cap unavailable")
-
-    if market_cap >= 5_000_000 and liq_to_mcap < 0.03:
-        score -= 14
-        reasons.append("suspiciously high market cap with weak liquidity")
+    points = 0
+    if liquidity >= 100_000:
+        points += 5
+    elif liquidity >= 50_000:
+        points += 4
+    elif liquidity >= 20_000:
+        points += 3
+    elif liquidity >= 10_000:
+        points += 2
 
     if volume_5m >= 20_000:
-        score += 14
-        reasons.append("rising 5-minute volume")
+        points += 5
     elif volume_5m >= 8_000:
-        score += 9
-        reasons.append("solid 5-minute volume")
+        points += 4
     elif volume_5m >= 3_000:
-        score += 4
-        reasons.append("modest 5-minute volume")
-    else:
-        score -= 8
-        reasons.append("very low 5-minute volume")
+        points += 3
+    elif volume_5m >= 1_000:
+        points += 2
 
-    if volume_1h >= 120_000:
-        score += 10
-        reasons.append("strong 1-hour volume")
-    elif volume_1h >= 40_000:
-        score += 6
-        reasons.append("healthy 1-hour volume")
-    elif volume_1h < 10_000:
-        score -= 5
-        reasons.append("weak 1-hour volume")
+    if buys_5m > sells_5m and buys_5m >= 10:
+        points += 3
+    elif buys_5m >= sells_5m and total_txns_5m >= 8:
+        points += 2
 
-    if total_txns_5m >= 30:
-        score += 8
-        reasons.append("healthy transaction activity")
-    elif total_txns_5m >= 12:
-        score += 4
-        reasons.append("decent transaction activity")
-    elif total_txns_5m <= 2:
-        score -= 6
-        reasons.append("very low transaction activity")
+    if 0.5 <= price_5m <= 15:
+        points += 2
 
-    if buys_5m > sells_5m * 1.5 and buys_5m >= 10:
-        score += 12
-        reasons.append("buys clearly outpacing sells")
-    elif buys_5m > sells_5m:
-        score += 7
-        reasons.append("buys outpacing sells")
-    elif sells_5m > buys_5m * 1.2 and sells_5m >= 10:
-        score -= 12
-        reasons.append("sells outpacing buys")
+    return min(points, 15)
 
-    if 0.5 <= price_5m <= 8:
-        score += 8
-        reasons.append("positive 5-minute momentum")
-    elif 8 < price_5m <= 15:
-        score += 3
-        reasons.append("strong short-term momentum")
-    elif price_5m > 25:
-        score -= 12
-        reasons.append("extreme 5-minute spike may be exhausted")
-    elif price_5m < -8:
-        score -= 10
-        reasons.append("severe negative 5-minute momentum")
 
-    if 1 <= price_1h <= 20:
-        score += 8
-        reasons.append("positive 1-hour momentum")
-    elif 20 < price_1h <= 40:
-        score += 2
-        reasons.append("very strong 1-hour momentum")
-    elif price_1h > 60:
-        score -= 10
-        reasons.append("extreme 1-hour spike may be overextended")
-    elif price_1h < -15:
-        score -= 10
-        reasons.append("severe negative 1-hour momentum")
+def _calculate_smart_wallet_points(smart_wallet_count):
+    if smart_wallet_count >= 3:
+        return 10
+    if smart_wallet_count == 2:
+        return 7
+    if smart_wallet_count == 1:
+        return 3
+    return 0
 
-    pair_created = pair.get("pairCreatedAt")
-    if pair_created:
-        age_hours = (
-            datetime.now(timezone.utc).timestamp()
-            - pair_created / 1000
-        ) / 3600
 
-        if age_hours < 0.03:
-            score -= 20
-            reasons.append("pair is only seconds old")
-        elif age_hours < 0.20:
-            score -= 8
-            reasons.append("very new pair")
-        elif age_hours <= 48:
-            score += 6
-            reasons.append("newer pair with enough market time")
-    else:
-        reasons.append("pair age unavailable")
+def calculate_score(pair, candidate=None, smart_wallet_count=0):
+    """Create Falcon Rating v2 from source and activity component buckets."""
+    pump_points = _calculate_pumpfun_points(candidate, pair)
+    telegram_points = _calculate_telegram_points(candidate)
+    x_points = _calculate_x_points(candidate)
+    dex_points = _calculate_dex_activity_points(pair)
+    smart_points = _calculate_smart_wallet_points(smart_wallet_count)
 
-    if not reasons:
-        reasons.append("no strong bullish or bearish signals")
+    raw_data = (candidate or {}).get("raw_data", {}) if isinstance(candidate, dict) else {}
+    found_by = set(raw_data.get("found_by", [])) if isinstance(raw_data.get("found_by", []), list) else set()
 
-    return max(0, min(score, 100)), reasons
+    has_pumpfun = "pumpfun_tokens" in found_by
+    has_telegram = "telegram_channels" in found_by
+    has_x = "x_social" in found_by
+
+    confidence_bonus = 0
+    confidence_bonus_reason = "None"
+    if has_pumpfun and has_telegram and has_x:
+        confidence_bonus = 20
+        confidence_bonus_reason = "Pump.fun + Telegram + X"
+    elif has_telegram and has_x:
+        confidence_bonus = 15
+        confidence_bonus_reason = "Telegram + X"
+    elif has_pumpfun and has_telegram:
+        confidence_bonus = 10
+        confidence_bonus_reason = "Pump.fun + Telegram"
+    elif has_pumpfun and has_x:
+        confidence_bonus = 10
+        confidence_bonus_reason = "Pump.fun + X"
+
+    base_score = pump_points + telegram_points + x_points + dex_points + smart_points
+    score_pre_trust = base_score + confidence_bonus
+    trust_bonus, trust_evidence, trust_weight_hits = calculate_source_trust_bonus(
+        candidate,
+        smart_wallet_count=smart_wallet_count,
+        score_before_trust=score_pre_trust,
+    )
+    score = max(0, min(score_pre_trust + trust_bonus, 100))
+    breakdown = {
+        "pump": pump_points,
+        "telegram": telegram_points,
+        "x": x_points,
+        "dex": dex_points,
+        "smart": smart_points,
+        "confidence_bonus": confidence_bonus,
+        "trust_bonus": trust_bonus,
+        "trust_evidence": trust_evidence,
+        "trust_weight_hits": trust_weight_hits,
+    }
+    breakdown_lines = [
+        f"Pump: {pump_points}",
+        f"Telegram: {telegram_points}",
+        f"X: {x_points}",
+        f"Dex: {dex_points}",
+        f"Smart: {smart_points}",
+        f"Confidence bonus: +{confidence_bonus} ({confidence_bonus_reason})",
+        f"Trust bonus: +{trust_bonus} ({', '.join(trust_evidence) if trust_evidence else 'none'})",
+    ]
+    return score, breakdown_lines, breakdown
+
+
+def classify_confidence_tier(score):
+    """Map final Falcon score to confidence tier labels."""
+    score_value = int(max(0, min(100, safe_number(score))))
+    if score_value < 60:
+        return "LOW"
+    if score_value <= 74:
+        return "MEDIUM"
+    if score_value <= 89:
+        return "HIGH"
+    return "ELITE"
 
 
 def classify_risk(score, pair):
@@ -831,6 +1030,16 @@ def normalize_token_shape(token):
         confidence = 0
     normalized["confidence"] = max(0, min(confidence, 100))
 
+    confidence_tier = str(normalized.get("confidence_tier", "") or "").strip().upper()
+    if confidence_tier not in {"LOW", "MEDIUM", "HIGH", "ELITE"}:
+        confidence_tier = classify_confidence_tier(normalized.get("score", 0))
+    normalized["confidence_tier"] = confidence_tier
+
+    if not isinstance(normalized.get("score_breakdown"), dict):
+        normalized["score_breakdown"] = {}
+    if not isinstance(normalized.get("score_breakdown_lines"), list):
+        normalized["score_breakdown_lines"] = []
+
     for key in REQUIRED_TOKEN_KEYS:
         if key not in normalized:
             raise KeyError(f"Missing required token key: {key}")
@@ -855,6 +1064,7 @@ def scan_tokens(max_tokens=200, top_n=30):
         scanned_at = datetime.now(timezone.utc).isoformat()
         scanned_at_dt = parse_iso_datetime(scanned_at) or datetime.now(timezone.utc)
         seen_contracts = load_seen_contracts()
+        first_seen_by_contract = load_first_seen_contracts()
         smart_wallet_tracker = prune_smart_wallet_tracker(
             load_smart_wallet_tracker(),
             scanned_at_dt,
@@ -906,8 +1116,6 @@ def scan_tokens(max_tokens=200, top_n=30):
             if contract_address:
                 base["address"] = contract_address
             previous_token = previous_by_contract.get(contract_address)
-            score, reasons = calculate_score(pair)
-            risk_label = classify_risk(score, pair)
             if not contract_address or contract_address in seen_contracts_in_scan:
                 continue
             seen_contracts_in_scan.add(contract_address)
@@ -931,10 +1139,14 @@ def scan_tokens(max_tokens=200, top_n=30):
                 window_minutes=10,
             )
             combined_wallet_count = recent_wallet_count + estimated_wallet_count
-            wallet_bonus, wallet_bonus_reason = get_wallet_cluster_bonus(combined_wallet_count)
-            if wallet_bonus:
-                score = min(100, score + wallet_bonus)
-                reasons.append(wallet_bonus_reason)
+
+            score, breakdown_lines, breakdown = calculate_score(
+                pair,
+                candidate=candidate,
+                smart_wallet_count=combined_wallet_count,
+            )
+            reasons = list(breakdown_lines)
+            risk_label = classify_risk(score, pair)
 
             append_wallet_event(
                 smart_wallet_tracker,
@@ -952,6 +1164,7 @@ def scan_tokens(max_tokens=200, top_n=30):
                 sells_5m,
                 momentum,
             )
+            confidence_tier = classify_confidence_tier(score)
             signal, signal_reasons = classify_signal(
                 score=score,
                 confidence=confidence,
@@ -993,6 +1206,14 @@ def scan_tokens(max_tokens=200, top_n=30):
                 ]
 
             is_brand_new = contract_address not in seen_contracts
+            first_seen_at = get_or_set_first_seen(
+                first_seen_by_contract,
+                contract_address,
+                scanned_at,
+            )
+            first_seen_dt = parse_iso_datetime(first_seen_at) or scanned_at_dt
+            first_seen_ago = format_elapsed_since(first_seen_dt, scanned_at_dt)
+
             if is_brand_new:
                 new_tokens_detected.append(
                     {
@@ -1009,7 +1230,10 @@ def scan_tokens(max_tokens=200, top_n=30):
                 "signal_reasons": signal_reasons,
                 "momentum": momentum,
                 "confidence": confidence,
+                "confidence_tier": confidence_tier,
                 "reasons": reasons,
+                "score_breakdown": breakdown,
+                "score_breakdown_lines": breakdown_lines,
                 "token_name": base.get("name", "Unknown"),
                 "token_symbol": base.get("symbol", "UNKNOWN"),
                 "contract_address": contract_address or "N/A",
@@ -1056,6 +1280,9 @@ def scan_tokens(max_tokens=200, top_n=30):
                 "source_social_mentions": int(candidate.get("social_mentions", 0) or 0),
                 "telegram_channels": list((candidate.get("raw_data") or {}).get("telegram_channels", [])),
                 "telegram_messages": list((candidate.get("raw_data") or {}).get("telegram_messages", [])),
+                "first_seen_at": first_seen_at,
+                "first_seen_ago": first_seen_ago,
+                "last_updated_at": scanned_at,
             }
             current_token.update(build_memory_delta(current_token, previous_token))
 
@@ -1070,6 +1297,7 @@ def scan_tokens(max_tokens=200, top_n=30):
 
         if seen_contracts_in_scan:
             save_seen_contracts(seen_contracts.union(seen_contracts_in_scan))
+        save_first_seen_contracts(first_seen_by_contract)
         save_smart_wallet_tracker(smart_wallet_tracker)
 
         for token in new_tokens_detected:

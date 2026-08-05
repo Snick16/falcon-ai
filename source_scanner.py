@@ -1319,14 +1319,14 @@ def _dedupe_candidates(candidates: Sequence[TokenCandidate]) -> List[TokenCandid
             for row in existing_messages + candidate_messages:
                 if not isinstance(row, dict):
                     continue
-                key = (
+                message_key = (
                     str(row.get("channel", "") or ""),
                     str(row.get("message_id", "") or ""),
                     str(row.get("message_timestamp", "") or ""),
                 )
-                if key in seen_messages:
+                if message_key in seen_messages:
                     continue
-                seen_messages.add(key)
+                seen_messages.add(message_key)
                 merged_messages.append(row)
             existing.raw_data["telegram_messages"] = merged_messages
 
@@ -1341,6 +1341,64 @@ def _dedupe_candidates(candidates: Sequence[TokenCandidate]) -> List[TokenCandid
                 }
             )
 
+        existing_x_posts = existing.raw_data.get("x_posts", [])
+        candidate_x_posts = candidate.raw_data.get("x_posts", [])
+        if isinstance(existing_x_posts, list) and isinstance(candidate_x_posts, list):
+            merged_x_posts = []
+            seen_x_posts = set()
+            for post in existing_x_posts + candidate_x_posts:
+                if not isinstance(post, dict):
+                    continue
+                post_key = (
+                    str(post.get("tweet_id", "") or ""),
+                    str(post.get("author_id", "") or ""),
+                    str(post.get("created_at", "") or ""),
+                    str(post.get("text", "") or ""),
+                )
+                if post_key in seen_x_posts:
+                    continue
+                seen_x_posts.add(post_key)
+                merged_x_posts.append(post)
+            existing.raw_data["x_posts"] = merged_x_posts
+
+        existing_authors = existing.raw_data.get("x_author_ids", [])
+        candidate_authors = candidate.raw_data.get("x_author_ids", [])
+        if isinstance(existing_authors, list) and isinstance(candidate_authors, list):
+            existing.raw_data["x_author_ids"] = sorted(
+                {
+                    str(author)
+                    for author in (existing_authors + candidate_authors)
+                    if str(author).strip()
+                }
+            )
+
+        existing_usernames = existing.raw_data.get("x_author_usernames", [])
+        candidate_usernames = candidate.raw_data.get("x_author_usernames", [])
+        if isinstance(existing_usernames, list) and isinstance(candidate_usernames, list):
+            existing.raw_data["x_author_usernames"] = sorted(
+                {
+                    str(username)
+                    for username in (existing_usernames + candidate_usernames)
+                    if str(username).strip()
+                }
+            )
+
+        merged_x_posts = existing.raw_data.get("x_posts", [])
+        merged_mentions = len(merged_x_posts) if isinstance(merged_x_posts, list) else 0
+        existing_mentions = _safe_int(existing.raw_data.get("x_mention_count", 0))
+        candidate_mentions = _safe_int(candidate.raw_data.get("x_mention_count", 0))
+        existing.raw_data["x_mention_count"] = max(existing_mentions, candidate_mentions, merged_mentions)
+
+        existing_unique_authors = _safe_int(existing.raw_data.get("x_unique_author_count", 0))
+        candidate_unique_authors = _safe_int(candidate.raw_data.get("x_unique_author_count", 0))
+        merged_author_ids = existing.raw_data.get("x_author_ids", [])
+        merged_author_count = len(merged_author_ids) if isinstance(merged_author_ids, list) else 0
+        existing.raw_data["x_unique_author_count"] = max(
+            existing_unique_authors,
+            candidate_unique_authors,
+            merged_author_count,
+        )
+
         existing.social_mentions = max(existing.social_mentions, candidate.social_mentions)
 
         # Keep richer market snapshot where available.
@@ -1349,6 +1407,11 @@ def _dedupe_candidates(candidates: Sequence[TokenCandidate]) -> List[TokenCandid
             merged_candidate.raw_data["found_by"] = merged_sources
             merged_candidate.raw_data["telegram_messages"] = existing.raw_data.get("telegram_messages", [])
             merged_candidate.raw_data["telegram_channels"] = existing.raw_data.get("telegram_channels", [])
+            merged_candidate.raw_data["x_posts"] = existing.raw_data.get("x_posts", [])
+            merged_candidate.raw_data["x_author_ids"] = existing.raw_data.get("x_author_ids", [])
+            merged_candidate.raw_data["x_author_usernames"] = existing.raw_data.get("x_author_usernames", [])
+            merged_candidate.raw_data["x_mention_count"] = existing.raw_data.get("x_mention_count", 0)
+            merged_candidate.raw_data["x_unique_author_count"] = existing.raw_data.get("x_unique_author_count", 0)
             merged_candidate.social_mentions = max(merged_candidate.social_mentions, existing.social_mentions)
             merged[key] = merged_candidate
 

@@ -664,6 +664,48 @@ def fmt_age_minutes(value):
     return f"{mins:.0f}m"
 
 
+def fmt_full_utc_datetime(iso_value):
+    if not iso_value:
+        return "N/A"
+    try:
+        parsed = datetime.fromisoformat(str(iso_value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except ValueError:
+        return str(iso_value)
+
+
+def fmt_relative_from_iso(iso_value):
+    if not iso_value:
+        return "N/A"
+    try:
+        parsed = datetime.fromisoformat(str(iso_value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        delta_seconds = max(0, int((now - parsed.astimezone(timezone.utc)).total_seconds()))
+    except ValueError:
+        return "N/A"
+
+    if delta_seconds < 60:
+        return f"{delta_seconds}s ago"
+    minutes = delta_seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    rem_minutes = minutes % 60
+    if hours < 24:
+        if rem_minutes == 0:
+            return f"{hours}h ago"
+        return f"{hours}h {rem_minutes}m ago"
+    days = hours // 24
+    rem_hours = hours % 24
+    if rem_hours == 0:
+        return f"{days}d ago"
+    return f"{days}d {rem_hours}h ago"
+
+
 def strongest_signal(tokens):
     ranking = {"BUY NOW": 4, "BUY": 3, "WATCH": 2, "PASS": 1}
     best = "PASS"
@@ -743,6 +785,7 @@ def render_top_cards(tokens):
         contract = str(token.get("contract_address", ""))
         signal = str(token.get("signal", "PASS"))
         score = to_int(token.get("score", 0))
+        confidence_tier = str(token.get("confidence_tier", "LOW"))
         move = float(token.get("price_change_5m_pct", 0) or 0)
         card_class = "opp-card buy-now" if signal == "BUY NOW" else "opp-card"
         avatar = html.escape(symbol[:1] if symbol else "?")
@@ -761,6 +804,7 @@ def render_top_cards(tokens):
                         <div class="opp-score {score_style(score)}">{score}<small>/100</small></div>
                     </div>
                     <div>{signal_badge(signal)}</div>
+                    <div class="opp-row"><span>Confidence</span><span>{html.escape(confidence_tier)}</span></div>
                     <div class="opp-row"><span>MCap</span><span>{fmt_money(token.get('market_cap_usd', 0))}</span></div>
                     <div class="opp-row"><span>Liq</span><span>{fmt_money(token.get('liquidity_usd', 0))}</span></div>
                     <div class="opp-row"><span>5m</span><span class="{move_class(move)}">{move:+.2f}%</span></div>
@@ -781,11 +825,15 @@ def render_desktop_table(tokens):
         score = to_int(token.get("score", 0))
         signal = str(token.get("signal", "PASS"))
         risk = str(token.get("risk_label", "HIGH"))
+        confidence_tier = str(token.get("confidence_tier", "LOW"))
         symbol = str(token.get("token_symbol", "UNKNOWN"))
         name = str(token.get("token_name", "Unknown"))
         contract = str(token.get("contract_address", ""))
         heat = str(token.get("social_heat", "⚪ QUIET"))
         heat_reasons = " | ".join(token.get("social_heat_reasons", []) or ["No social reasons"])
+        breakdown_text = " | ".join(token.get("score_breakdown_lines", []) or ["No rating breakdown"])
+        first_seen_at = fmt_full_utc_datetime(token.get("first_seen_at", ""))
+        first_seen_ago = fmt_relative_from_iso(token.get("first_seen_at", ""))
         high_priority = "HIGH PRIORITY" if bool(token.get("high_priority_alert", False)) else ""
         move = float(token.get("price_change_5m_pct", 0) or 0)
         row_state = ""
@@ -804,6 +852,7 @@ def render_desktop_table(tokens):
                 <td><span class="{score_style(score)}">{score}</span></td>
                 <td>{signal_badge(signal)}</td>
                 <td>{risk_badge(risk)}</td>
+                <td>{html.escape(confidence_tier)}</td>
                 <td>{html.escape(name)} ({html.escape(symbol)})</td>
                 <td>{fmt_money(token.get('market_cap_usd', 0))}</td>
                 <td>{fmt_money(token.get('liquidity_usd', 0))}</td>
@@ -820,12 +869,15 @@ def render_desktop_table(tokens):
         details = dedent(
             f"""
             <tr>
-                <td colspan="12">
+                <td colspan="13">
                     <details class="row-details">
                         <summary>Details</summary>
                         <div class="detail-grid">
                             <div class="label">Contract</div><div class="value">{html.escape(contract)}</div>
-                            <div class="label">Confidence</div><div class="value">{to_int(token.get('confidence', 0))}</div>
+                            <div class="label">Confidence</div><div class="value">{html.escape(confidence_tier)} ({to_int(token.get('confidence', 0))})</div>
+                            <div class="label">First Seen</div><div class="value">{html.escape(first_seen_at)}</div>
+                            <div class="label">First Seen Ago</div><div class="value">{html.escape(first_seen_ago)}</div>
+                            <div class="label">Falcon Rating v2</div><div class="value">{html.escape(breakdown_text)}</div>
                             <div class="label">5m Volume</div><div class="value">{fmt_money(token.get('volume_5m_usd', 0))}</div>
                             <div class="label">Momentum</div><div class="value">{html.escape(str(token.get('momentum', 'NEUTRAL')))}</div>
                             <div class="label">Intelligence Reasons</div><div class="value">{html.escape(', '.join(token.get('falcon_intelligence_reasons', []) or []))}</div>
@@ -849,7 +901,7 @@ def render_desktop_table(tokens):
         '<div class="table-shell-title"><span>Live Token Scanner</span><span class="right">Dense Mode</span></div>'
         '<table class="falcon-table">'
         "<thead><tr>"
-        "<th>Score</th><th>Signal</th><th>Risk</th><th>Token</th><th>MCap</th><th>Liq</th>"
+        "<th>Score</th><th>Signal</th><th>Risk</th><th>Confidence</th><th>Token</th><th>MCap</th><th>Liq</th>"
         "<th>5m %</th><th>Buys/Sells</th><th>Smart</th><th>Social</th><th>Age</th><th>Actions</th>"
         "</tr></thead><tbody>"
         + "".join(rows_html)
@@ -863,10 +915,14 @@ def render_mobile_cards(tokens):
     for token in tokens:
         score = to_int(token.get("score", 0))
         signal = str(token.get("signal", "PASS"))
+        confidence_tier = str(token.get("confidence_tier", "LOW"))
         heat = str(token.get("social_heat", "⚪ QUIET"))
         move = float(token.get("price_change_5m_pct", 0) or 0)
         contract = str(token.get("contract_address", ""))
         details = html.escape(", ".join(token.get("falcon_intelligence_reasons", []) or []))
+        breakdown_text = html.escape(" | ".join(token.get("score_breakdown_lines", []) or ["No rating breakdown"]))
+        first_seen_at = fmt_full_utc_datetime(token.get("first_seen_at", ""))
+        first_seen_ago = fmt_relative_from_iso(token.get("first_seen_at", ""))
         card = dedent(
             f"""
             <div class="mobile-token">
@@ -876,6 +932,7 @@ def render_mobile_cards(tokens):
                 </div>
                 <div>{signal_badge(signal)} {risk_badge(str(token.get('risk_label', 'HIGH')))}</div>
                 <div class="mobile-grid">
+                    <div>Confidence: {html.escape(confidence_tier)}</div>
                     <div>MCap: {fmt_money(token.get('market_cap_usd', 0))}</div>
                     <div>Liq: {fmt_money(token.get('liquidity_usd', 0))}</div>
                     <div>5m: <span class="{move_class(move)}">{move:+.2f}%</span></div>
@@ -891,7 +948,10 @@ def render_mobile_cards(tokens):
                     <summary>Details</summary>
                     <div class="detail-grid">
                         <div class="label">Contract</div><div class="value">{html.escape(contract)}</div>
-                        <div class="label">Confidence</div><div class="value">{to_int(token.get('confidence', 0))}</div>
+                        <div class="label">Confidence</div><div class="value">{html.escape(confidence_tier)} ({to_int(token.get('confidence', 0))})</div>
+                        <div class="label">First Seen</div><div class="value">{html.escape(first_seen_at)}</div>
+                        <div class="label">First Seen Ago</div><div class="value">{html.escape(first_seen_ago)}</div>
+                        <div class="label">Falcon Rating v2</div><div class="value">{breakdown_text}</div>
                         <div class="label">Volume</div><div class="value">{fmt_money(token.get('volume_5m_usd', 0))}</div>
                         <div class="label">Intelligence</div><div class="value">{details}</div>
                         <div class="label">BUY NOW Reasons</div><div class="value">{html.escape(', '.join(token.get('buy_now_reasons', []) or []))}</div>
