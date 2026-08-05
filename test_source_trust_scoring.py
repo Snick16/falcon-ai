@@ -118,6 +118,36 @@ class SourceTrustScoringTests(unittest.TestCase):
             "2026-08-04T09:00:00+00:00",
         )
 
+    def test_social_momentum_increases_combined_rating(self):
+        os.environ.pop("SOURCE_TRUST_WEIGHTS", None)
+        pair = _pair_template()
+
+        candidate = {
+            "raw_data": {
+                "found_by": ["x_social", "telegram_channels"],
+                "x_mention_count": 3,
+                "x_unique_author_count": 2,
+                "telegram_messages": [{"channel": "alpha", "message_id": 1, "message_timestamp": "2026-08-04T00:00:00+00:00"}],
+                "telegram_channels": ["alpha"],
+            }
+        }
+
+        score_without_social, _, _ = calculate_score(
+            pair,
+            candidate,
+            smart_wallet_count=0,
+            social_heat_score=0,
+        )
+        score_with_social, _, breakdown_with_social = calculate_score(
+            pair,
+            candidate,
+            smart_wallet_count=0,
+            social_heat_score=90,
+        )
+
+        self.assertGreater(score_with_social, score_without_social)
+        self.assertGreater(breakdown_with_social.get("social_momentum", 0), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

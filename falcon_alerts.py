@@ -112,6 +112,7 @@ def _format_source_triggers(token: Dict[str, object]) -> Tuple[str, str]:
         ("X", "x"),
         ("Dex", "dex"),
         ("Smart", "smart"),
+        ("Social", "social_momentum"),
     ]
 
     scored = []

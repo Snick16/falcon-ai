@@ -650,13 +650,40 @@ def _calculate_smart_wallet_points(smart_wallet_count):
     return 0
 
 
-def calculate_score(pair, candidate=None, smart_wallet_count=0):
+def _calculate_social_momentum_points(candidate, social_heat_score=0):
+    """Add modest social momentum points from mentions and social heat."""
+    raw_data = (candidate or {}).get("raw_data", {}) if isinstance(candidate, dict) else {}
+    x_mentions = int(raw_data.get("x_mention_count", 0) or 0)
+    telegram_mentions = len(raw_data.get("telegram_messages", [])) if isinstance(raw_data.get("telegram_messages", []), list) else 0
+    total_mentions = max(0, x_mentions) + max(0, telegram_mentions)
+
+    points = 0
+    heat_value = int(max(0, min(100, safe_number(social_heat_score))))
+    if heat_value >= 85:
+        points += 5
+    elif heat_value >= 65:
+        points += 4
+    elif heat_value >= 40:
+        points += 2
+
+    if total_mentions >= 8:
+        points += 3
+    elif total_mentions >= 4:
+        points += 2
+    elif total_mentions >= 2:
+        points += 1
+
+    return min(points, 8)
+
+
+def calculate_score(pair, candidate=None, smart_wallet_count=0, social_heat_score=0):
     """Create Falcon Rating v2 from source and activity component buckets."""
     pump_points = _calculate_pumpfun_points(candidate, pair)
     telegram_points = _calculate_telegram_points(candidate)
     x_points = _calculate_x_points(candidate)
     dex_points = _calculate_dex_activity_points(pair)
     smart_points = _calculate_smart_wallet_points(smart_wallet_count)
+    social_points = _calculate_social_momentum_points(candidate, social_heat_score)
 
     raw_data = (candidate or {}).get("raw_data", {}) if isinstance(candidate, dict) else {}
     found_by = set(raw_data.get("found_by", [])) if isinstance(raw_data.get("found_by", []), list) else set()
@@ -680,7 +707,7 @@ def calculate_score(pair, candidate=None, smart_wallet_count=0):
         confidence_bonus = 10
         confidence_bonus_reason = "Pump.fun + X"
 
-    base_score = pump_points + telegram_points + x_points + dex_points + smart_points
+    base_score = pump_points + telegram_points + x_points + dex_points + smart_points + social_points
     score_pre_trust = base_score + confidence_bonus
     trust_bonus, trust_evidence, trust_weight_hits = calculate_source_trust_bonus(
         candidate,
@@ -694,6 +721,7 @@ def calculate_score(pair, candidate=None, smart_wallet_count=0):
         "x": x_points,
         "dex": dex_points,
         "smart": smart_points,
+        "social_momentum": social_points,
         "confidence_bonus": confidence_bonus,
         "trust_bonus": trust_bonus,
         "trust_evidence": trust_evidence,
@@ -705,6 +733,7 @@ def calculate_score(pair, candidate=None, smart_wallet_count=0):
         f"X: {x_points}",
         f"Dex: {dex_points}",
         f"Smart: {smart_points}",
+        f"Social momentum: {social_points}",
         f"Confidence bonus: +{confidence_bonus} ({confidence_bonus_reason})",
         f"Trust bonus: +{trust_bonus} ({', '.join(trust_evidence) if trust_evidence else 'none'})",
     ]
@@ -1220,10 +1249,23 @@ def scan_tokens(max_tokens=200, top_n=30):
 
             combined_wallet_count = recent_wallet_count + estimated_wallet_count + confirmed_whale_count
 
+            intelligence = calculate_intelligence_engine(pair, previous_token)
+
+            social_intelligence = SOCIAL_ENGINE.evaluate(
+                SocialContext(
+                    pair=pair,
+                    previous_token=previous_token,
+                    boost_amount=safe_number((candidate.get("raw_data") or {}).get("boost_amount", 0)),
+                    holder_count=intelligence.get("holder_count"),
+                    scanned_at=scanned_at_dt,
+                )
+            )
+
             score, breakdown_lines, breakdown = calculate_score(
                 pair,
                 candidate=candidate,
                 smart_wallet_count=combined_wallet_count,
+                social_heat_score=social_intelligence.get("social_heat_score", 0),
             )
             reasons = list(breakdown_lines)
             risk_label = classify_risk(score, pair)
@@ -1254,16 +1296,6 @@ def scan_tokens(max_tokens=200, top_n=30):
                 volume_5m=volume_5m_usd,
                 buys_5m=buys_5m,
                 sells_5m=sells_5m,
-            )
-            intelligence = calculate_intelligence_engine(pair, previous_token)
-            social_intelligence = SOCIAL_ENGINE.evaluate(
-                SocialContext(
-                    pair=pair,
-                    previous_token=previous_token,
-                    boost_amount=safe_number((candidate.get("raw_data") or {}).get("boost_amount", 0)),
-                    holder_count=intelligence.get("holder_count"),
-                    scanned_at=scanned_at_dt,
-                )
             )
 
             smart_wallet_high = combined_wallet_count >= 3
