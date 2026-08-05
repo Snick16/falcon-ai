@@ -50,13 +50,19 @@ def run_scanner_shape_checks():
     original_env = {
         "X_BEARER_TOKEN": os.environ.get("X_BEARER_TOKEN"),
         "X_SEARCH_TERMS": os.environ.get("X_SEARCH_TERMS"),
-        "TELEGRAM_SCAN_API_URL": os.environ.get("TELEGRAM_SCAN_API_URL"),
+        "TELEGRAM_API_ID": os.environ.get("TELEGRAM_API_ID"),
+        "TELEGRAM_API_HASH": os.environ.get("TELEGRAM_API_HASH"),
+        "TELEGRAM_SESSION": os.environ.get("TELEGRAM_SESSION"),
+        "TELEGRAM_CHANNELS": os.environ.get("TELEGRAM_CHANNELS"),
         "PUMPFUN_ENABLED": os.environ.get("PUMPFUN_ENABLED"),
     }
     try:
         os.environ.pop("X_BEARER_TOKEN", None)
         os.environ.pop("X_SEARCH_TERMS", None)
-        os.environ.pop("TELEGRAM_SCAN_API_URL", None)
+        os.environ.pop("TELEGRAM_API_ID", None)
+        os.environ.pop("TELEGRAM_API_HASH", None)
+        os.environ.pop("TELEGRAM_SESSION", None)
+        os.environ.pop("TELEGRAM_CHANNELS", None)
         os.environ["PUMPFUN_ENABLED"] = "false"
 
         payload = collect_all_candidates(max_candidates=30)
@@ -70,6 +76,21 @@ def run_scanner_shape_checks():
             assert_true(source_status is not None, f"Missing scanner status for {source_name}")
             assert_true(source_status.get("configured") is False, f"{source_name} should be not configured")
             assert_true(isinstance(source_status.get("error", ""), str), f"{source_name} should provide status message")
+
+        telegram_status = status_by_source.get("telegram_channels", {})
+        telegram_details = telegram_status.get("details", {}) if isinstance(telegram_status, dict) else {}
+        assert_true(isinstance(telegram_details, dict), "telegram scanner status should include details")
+        for key in (
+            "connected",
+            "channels_requested",
+            "channels_scanned",
+            "messages_checked",
+            "contracts_detected",
+            "candidates_returned",
+            "elapsed_ms",
+            "error_message",
+        ):
+            assert_true(key in telegram_details, f"telegram status details missing {key}")
 
         candidates = payload.get("candidates", [])
         token_addresses = [str(item.get("token_address", "")).strip() for item in candidates if isinstance(item, dict)]

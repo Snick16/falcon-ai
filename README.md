@@ -9,7 +9,7 @@ Falcon AI Hunter scans Solana token opportunities, rates each candidate with the
 - dexscreener_trending: public DexScreener search-based trending flow
 - new_solana_pairs: public DexScreener latest token profiles flow
 - pumpfun_tokens: optional source, enabled with PUMPFUN_ENABLED and PUMPFUN_API_URL
-- telegram_channels: optional source, enabled with TELEGRAM_SCAN_API_URL
+- telegram_channels: optional source, enabled with TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION, TELEGRAM_CHANNELS
 - x_social: optional source, enabled with X_BEARER_TOKEN and X_SEARCH_TERMS
 
 ## Environment Variables
@@ -27,8 +27,8 @@ Optional scanner/social variables:
 - TELEGRAM_API_HASH
 - TELEGRAM_SESSION
 - TELEGRAM_CHANNELS
-- TELEGRAM_SCAN_API_URL
-- TELEGRAM_SCAN_BEARER
+- TELEGRAM_LOOKBACK_MINUTES
+- TELEGRAM_MAX_MESSAGES_PER_CHANNEL
 - X_BEARER_TOKEN
 - X_SEARCH_TERMS
 - X_API_URL
@@ -78,17 +78,23 @@ python -m pip install -r requirements.txt
 
 Start dashboard:
 
-streamlit run dashboard.py
+python -m streamlit run dashboard.py
 
 Run CLI scanner:
 
 python Scanner.py
+
+Create Telegram session for channel scanning (local one-time setup):
+
+python telegram_setup.py
 
 ## Smoke Test
 
 Run:
 
 python smoke_test.py
+
+python -m unittest -v test_telegram_parser.py
 
 The smoke test checks:
 
@@ -97,3 +103,4 @@ The smoke test checks:
 - multi-source duplicate merge by token address works
 - missing social credentials do not crash collection
 - scanner status includes not-configured source messages
+- Telegram parser extracts CA/contract/mint/address calls from sample messages without live Telegram login

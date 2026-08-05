@@ -1054,6 +1054,8 @@ def scan_tokens(max_tokens=200, top_n=30):
                 "source_discovered_at": str(candidate.get("discovered_at", scanned_at)),
                 "source_pair_address": str(candidate.get("pair_address", "")),
                 "source_social_mentions": int(candidate.get("social_mentions", 0) or 0),
+                "telegram_channels": list((candidate.get("raw_data") or {}).get("telegram_channels", [])),
+                "telegram_messages": list((candidate.get("raw_data") or {}).get("telegram_messages", [])),
             }
             current_token.update(build_memory_delta(current_token, previous_token))
 
