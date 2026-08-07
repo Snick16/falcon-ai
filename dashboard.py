@@ -1,5 +1,6 @@
 import html
 import os
+import base64
 from datetime import datetime, timezone
 from textwrap import dedent
 from pathlib import Path
@@ -76,24 +77,24 @@ def inject_css():
         @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600;700&display=swap');
 
         :root {
-            --bg: #070a0f;
-            --panel: #0e141d;
-            --panel-2: #101924;
-            --panel-3: #0b121b;
-            --border: #1f2c3d;
-            --text: #dfe9f7;
-            --muted: #8fa3be;
-            --ok: #42d989;
-            --warn: #f1b74a;
-            --bad: #ea4f68;
-            --live: #33d17a;
-            --safe-top: 32px;
+            --bg: #020202;
+            --panel: #0a0a0a;
+            --panel-2: #0c0c0c;
+            --panel-3: #080808;
+            --border: #2aff84;
+            --border-soft: #1f8f4f;
+            --text: #f2f2f2;
+            --muted: #a3a3a3;
+            --ok: #66ff9f;
+            --warn: #d7d76e;
+            --bad: #ff5d5d;
+            --eye: #ff5e1a;
+            --eye-bright: #ff6f2d;
+            --safe-top: 14px;
         }
 
         .stApp {
-            background:
-                radial-gradient(1250px 540px at 8% -16%, #1a2d43 0%, rgba(14, 21, 31, 0.18) 46%, transparent 68%),
-                linear-gradient(180deg, #070b11 0%, #06090e 100%);
+            background: #000000;
             color: var(--text);
             font-size: 14px;
             font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
@@ -101,84 +102,205 @@ def inject_css():
 
         .block-container {
             padding-top: var(--safe-top);
-            padding-bottom: 0.35rem;
-            max-width: 1420px;
+            padding-bottom: 0.4rem;
+            max-width: 1540px;
         }
 
-        .falcon-header {
+        .fal-shell {
             display: flex;
-            align-items: center;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .fal-panel {
+            border: 1px solid var(--border-soft);
+            border-radius: 11px;
+            background: #000000;
+            box-shadow: none;
+            padding: 5px 8px;
+        }
+
+        .fal-title-wrap {
+            margin: 0;
+            padding: 0;
+            position: relative;
+            width: 100%;
+            overflow: hidden;
+            background: #000000;
+            min-height: 172px;
+        }
+
+        .fal-header-image-wrap {
+            position: absolute;
+            inset: 0;
+            width: 100% !important;
+            height: 100% !important;
+            max-width: none !important;
+            background: #000000;
+            min-height: 0;
+            padding: 0 !important;
+            margin: 0 !important;
+            overflow: hidden;
+        }
+
+        .fal-header-image-wrap.normal {
+            box-shadow: inset 0 0 10px rgba(255, 94, 26, 0.14);
+        }
+
+        .fal-header-image-wrap.high-priority {
+            box-shadow: inset 0 0 14px rgba(255, 94, 26, 0.24), 0 0 16px rgba(255, 94, 26, 0.22);
+            animation: falEyePulse 1.3s ease-in-out infinite;
+        }
+
+        @keyframes falEyePulse {
+            0%, 100% { filter: saturate(1); }
+            50% { filter: saturate(1.35) brightness(1.1); }
+        }
+
+        .fal-eye-img {
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            width: 100% !important;
+            height: 100% !important;
+            max-width: none !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            object-fit: fill !important;
+            object-position: center;
+            opacity: 0.98;
+            filter: drop-shadow(0 0 8px rgba(255, 94, 26, 0.45));
+            z-index: 1;
+            display: block;
+            transform: none;
+        }
+
+        .fal-header-image-wrap.high-priority .fal-eye-img {
+            filter: drop-shadow(0 0 12px rgba(255, 94, 26, 0.78));
+        }
+
+        .fal-header-image-wrap.no-image {
+            background: #000000;
+            box-shadow: inset 0 0 10px rgba(255, 94, 26, 0.12);
+        }
+
+        .fal-header-image-wrap.no-image.high-priority {
+            box-shadow: inset 0 0 14px rgba(255, 94, 26, 0.28), 0 0 14px rgba(255, 94, 26, 0.2);
+        }
+
+        .fal-controls-panel {
+            padding: 6px 8px;
+        }
+
+        .fal-top-row,
+        .fal-bottom-row {
+            display: flex;
             justify-content: space-between;
-            gap: 6px;
-            padding: 6px 10px;
-            border: 1px solid #2b3d53;
-            border-radius: 9px;
-            background: linear-gradient(180deg, #111b28 0%, #0d1622 100%);
-            box-shadow: inset 0 0 0 1px rgba(174, 198, 230, 0.05);
-            margin-bottom: 0;
-        }
-
-        .falcon-brand {
-            display: flex;
+            gap: 8px;
             align-items: center;
-            gap: 7px;
-            min-width: 0;
         }
 
-        .falcon-eye {
-            font-size: 0.95rem;
-            line-height: 1;
+        .fal-bottom-row {
+            margin-top: 6px;
         }
 
-        .falcon-title {
-            font-size: 0.9rem;
-            font-weight: 800;
-            letter-spacing: 0.07em;
-            white-space: nowrap;
-        }
-
-        .falcon-meta {
-            font-size: 0.68rem;
-            color: var(--muted);
-            display: flex;
+        .fal-status-left,
+        .fal-status-right,
+        .fal-center-nav {
+            display: inline-flex;
             align-items: center;
             gap: 6px;
             flex-wrap: wrap;
         }
 
-        .meta-sep {
-            width: 1px;
-            height: 11px;
-            background: #2a384b;
-            display: inline-block;
-        }
-
-        .meta-chip {
-            color: #c2d4ea;
-            font-weight: 700;
-            letter-spacing: 0.02em;
-            padding: 1px 6px;
+        .status-chip {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 3px 9px;
             border-radius: 999px;
-            border: 1px solid #2b3b50;
-            background: #0f1a29;
+            border: 1px solid var(--border-soft);
+            background: #000000;
+            color: #c9ffd9;
+            font-size: 0.63rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            text-decoration: none;
+            white-space: nowrap;
         }
 
-        .meta-chip .muted { color: #8599b4; font-weight: 600; margin-right: 3px; }
+        .status-chip.active {
+            border-color: #3ef08d;
+            box-shadow: none;
+        }
+
+        .status-chip.dim {
+            color: #86b997;
+        }
+
+        .icon-chip {
+            width: 30px;
+            height: 30px;
+            border-radius: 8px;
+            border: 1px solid var(--border-soft);
+            background: #000000;
+            color: #c9ffd9;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            text-decoration: none;
+            font-weight: 800;
+            font-size: 0.82rem;
+            line-height: 1;
+        }
+
+        .icon-chip:hover {
+            border-color: #3ef08d;
+            box-shadow: none;
+        }
 
         .control-strip {
-            margin-top: 4px;
-            margin-bottom: 4px;
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            background: #0c131d;
+            border: 1px solid var(--border-soft);
+            border-radius: 11px;
+            background: #000000;
             padding: 5px 7px;
         }
 
+        .fal-filter-shell {
+            border: 1px solid var(--border-soft);
+            border-radius: 11px;
+            background: #000000;
+            padding: 5px 7px;
+            margin-top: 1px;
+        }
+
+        .fal-filter-status {
+            height: 100%;
+            border: 1px solid var(--border-soft);
+            border-radius: 8px;
+            background: #000000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 44px;
+            padding: 4px 6px;
+        }
+
+        .fal-filter-status .status-chip {
+            width: 100%;
+            justify-content: center;
+            font-size: 0.61rem;
+            padding: 3px 6px;
+        }
+
         div[data-testid="stSelectbox"] label p {
-            font-size: 0.66rem;
-            letter-spacing: 0.03em;
+            font-size: 0.63rem;
+            letter-spacing: 0.09em;
             text-transform: uppercase;
-            color: #8fa4c0;
+            color: #a7ffca;
         }
 
         div[data-testid="stSelectbox"] > div > div,
@@ -186,121 +308,142 @@ def inject_css():
             min-height: 30px;
             font-size: 0.74rem;
             border-radius: 7px;
-            background: #0f1825;
-            border-color: #2a3a4f;
+            background: #000000;
+            border-color: var(--border-soft);
+            color: var(--text);
         }
 
         div[data-testid="stButton"] button {
             min-height: 30px;
             border-radius: 7px;
-            font-size: 0.7rem;
-            font-weight: 700;
-            letter-spacing: 0.03em;
+            font-size: 0.69rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            border: 1px solid var(--border-soft);
+            background: #000000;
+            color: #dcffe8;
+            box-shadow: none;
+        }
+
+        div[data-testid="stButton"] button:hover {
+            border-color: #3ef08d;
+            box-shadow: none;
         }
 
         div[data-testid="stToggle"] label p {
-            font-size: 0.7rem;
-        }
-
-        .live-dot {
-            width: 7px;
-            height: 7px;
-            border-radius: 50%;
-            margin: 0;
-            background: var(--live);
-            box-shadow: 0 0 8px var(--live);
+            font-size: 0.66rem;
+            color: #b6ffd0;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
         }
 
         .section-title {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            color: #a8bdd8;
+            color: #beffd7;
             font-size: 0.6rem;
             letter-spacing: 0.08em;
             font-weight: 800;
             text-transform: uppercase;
-            margin: 5px 0 4px 0;
+            margin: 2px 0 3px 0;
         }
 
         .section-title .right {
-            color: #7f94b1;
+            color: #98d7ad;
             text-transform: none;
             font-weight: 700;
             letter-spacing: 0;
             font-size: 0.62rem;
         }
 
+        .fal-nav-strip-wrap {
+            text-align: center;
+            margin-top: 1px;
+        }
+
+        .fal-nav-strip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+            border: 1px solid var(--border-soft);
+            border-radius: 11px;
+            padding: 5px 8px;
+            background: #000000;
+        }
+
         .falcon-grid {
             display: grid;
             grid-template-columns: repeat(8, minmax(90px, 1fr));
             gap: 5px;
-            margin: 3px 0 0 0;
+            margin: 0;
         }
 
         .falcon-stat {
-            border: 1px solid #27384c;
-            border-radius: 7px;
-            padding: 3px 6px;
-            background: #0e161f;
-            opacity: 0.9;
+            border: 1px solid var(--border-soft);
+            border-radius: 8px;
+            padding: 4px 6px;
+            background: #000000;
         }
 
         .falcon-stat .k {
-            color: var(--muted);
+            color: #a7ffca;
             font-size: 0.62rem;
             text-transform: uppercase;
             letter-spacing: 0.04em;
         }
 
         .falcon-stat .v {
-            font-size: 0.8rem;
+            font-size: 0.82rem;
             font-weight: 700;
             margin-top: 1px;
             font-family: 'IBM Plex Mono', monospace;
+            color: #efefef;
         }
 
         .opps-grid {
             display: grid;
-            grid-template-columns: repeat(3, minmax(220px, 1fr));
-            gap: 5px;
-            margin: 1px 0 3px 0;
+            grid-template-columns: repeat(3, minmax(230px, 1fr));
+            gap: 8px;
+            margin: 0;
         }
 
         .opp-card {
-            border: 1px solid #2b3d53;
-            border-radius: 8px;
-            background: linear-gradient(180deg, #121d2b 0%, #0f1824 100%);
-            padding: 7px;
+            border: 1px solid var(--border-soft);
+            border-radius: 10px;
+            background: #000000;
+            padding: 9px;
             min-width: 0;
-            opacity: 0.95;
-            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.022), 0 8px 18px rgba(3, 8, 14, 0.34);
+            min-height: 252px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: none;
         }
 
         .opp-card.buy-now {
-            border-color: #cc4e52;
-            background: linear-gradient(180deg, #27121a 0%, #161622 100%);
-            box-shadow: inset 0 0 0 1px rgba(255, 205, 138, 0.22), 0 0 0 1px rgba(204, 78, 82, 0.35), 0 10px 22px rgba(157, 37, 57, 0.26);
-            opacity: 1;
+            border-color: #3ef08d;
+            box-shadow: none;
         }
 
         .opp-head {
             display: flex;
             align-items: center;
-            gap: 6px;
+            gap: 7px;
         }
 
         .opp-avatar {
-            width: 22px;
-            height: 22px;
+            width: 24px;
+            height: 24px;
             border-radius: 50%;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            background: #17253a;
-            color: #bdd0e7;
+            background: #000000;
+            color: #c4ffd8;
             font-size: 0.7rem;
-            border: 1px solid #375073;
+            border: 1px solid var(--border-soft);
             font-weight: 800;
             flex: 0 0 auto;
         }
@@ -308,12 +451,12 @@ def inject_css():
         .opp-top {
             display: flex;
             justify-content: space-between;
-            gap: 6px;
-            margin-bottom: 4px;
+            gap: 10px;
+            margin-bottom: 6px;
         }
 
         .opp-symbol {
-            font-size: 0.78rem;
+            font-size: 0.8rem;
             font-weight: 700;
             white-space: nowrap;
             overflow: hidden;
@@ -321,7 +464,7 @@ def inject_css():
         }
 
         .opp-name {
-            color: #8ea5c3;
+            color: #a6ffc9;
             font-size: 0.58rem;
             margin-top: 1px;
             text-transform: uppercase;
@@ -329,27 +472,38 @@ def inject_css():
         }
 
         .opp-score {
-            font-size: 1.7rem;
+            font-size: 2.2rem;
             font-weight: 900;
-            line-height: 0.95;
-            letter-spacing: 0.02em;
+            line-height: 0.92;
+            letter-spacing: 0.01em;
             font-family: 'IBM Plex Mono', monospace;
-            text-shadow: 0 0 14px rgba(126, 226, 168, 0.2);
+            color: #75ffab;
+            text-shadow: none;
         }
 
         .opp-score small {
             font-size: 0.58rem;
-            color: #8195b1;
+            color: #a0cfae;
             margin-left: 2px;
+        }
+
+        .opp-metrics {
+            margin-top: 6px;
+            display: grid;
+            grid-template-columns: repeat(2, minmax(92px, 1fr));
+            gap: 4px 9px;
+            flex: 1;
+            align-content: start;
         }
 
         .opp-row {
             display: flex;
             justify-content: space-between;
             font-size: 0.69rem;
-            color: var(--muted);
-            margin-top: 2px;
+            color: #dddddd;
             gap: 6px;
+            border-bottom: 1px solid rgba(42, 255, 132, 0.12);
+            padding-bottom: 2px;
         }
 
         .opp-row span:last-child {
@@ -357,38 +511,41 @@ def inject_css():
         }
 
         .opp-actions {
-            margin-top: 4px;
+            margin-top: auto;
             display: flex;
-            gap: 5px;
-            flex-wrap: wrap;
+            gap: 7px;
+            justify-content: space-between;
         }
 
         .fal-btn {
-            border: 1px solid #2e425c;
-            border-radius: 6px;
-            padding: 1px 6px;
-            color: #d6e5fb;
+            border: 1px solid var(--border-soft);
+            border-radius: 7px;
+            padding: 2px 7px;
+            color: #dcffe8;
             font-size: 0.65rem;
             font-weight: 700;
-            letter-spacing: 0.02em;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
             text-decoration: none;
-            background: #101a27;
+            background: #000000;
             cursor: pointer;
+            text-align: center;
+            min-width: 96px;
         }
 
         .fal-btn:hover {
-            border-color: #3d5878;
-            background: #142032;
+            border-color: #3ef08d;
+            box-shadow: none;
         }
 
         .fal-table-wrap {
-            border: 1px solid #3a5070;
-            border-radius: 8px;
+            border: 1px solid var(--border-soft);
+            border-radius: 10px;
             overflow: auto;
-            background: #0e141e;
+            background: #000000;
             margin-top: 1px;
             max-height: 56vh;
-            box-shadow: 0 12px 26px rgba(3, 8, 14, 0.48);
+            box-shadow: none;
         }
 
         .table-shell-title {
@@ -396,9 +553,9 @@ def inject_css():
             justify-content: space-between;
             align-items: center;
             padding: 4px 8px;
-            border-bottom: 1px solid #2a3a52;
-            background: linear-gradient(180deg, #101c2a 0%, #0e1722 100%);
-            color: #adc3de;
+            border-bottom: 1px solid var(--border-soft);
+            background: #000000;
+            color: #beffd7;
             font-size: 0.62rem;
             text-transform: uppercase;
             letter-spacing: 0.07em;
@@ -408,7 +565,7 @@ def inject_css():
         .table-shell-title .right {
             text-transform: none;
             letter-spacing: 0;
-            color: #7e94b2;
+            color: #95cfaa;
             font-size: 0.62rem;
             font-weight: 700;
         }
@@ -421,31 +578,35 @@ def inject_css():
 
         .falcon-table th,
         .falcon-table td {
-            border-bottom: 1px solid #1d2838;
+            border-bottom: 1px solid rgba(42, 255, 132, 0.14);
             padding: 5px 8px;
             text-align: left;
             vertical-align: middle;
         }
 
         .falcon-table th {
-            color: #c5d4e8;
+            color: #beffd7;
             font-size: 0.7rem;
             letter-spacing: 0.04em;
             text-transform: uppercase;
-            background: #141d2a;
+            background: #000000;
             position: sticky;
             top: 0;
             z-index: 1;
-            box-shadow: inset 0 -1px 0 #243247;
+            box-shadow: none;
         }
 
         .falcon-table tbody tr:nth-child(4n + 1) td,
         .falcon-table tbody tr:nth-child(4n + 2) td {
-            background: rgba(16, 24, 36, 0.24);
+            background: #070707;
         }
 
         .falcon-table tbody tr:hover td {
-            background: rgba(48, 66, 92, 0.2);
+            background: #101010;
+        }
+
+        .falcon-table td {
+            color: #e9e9e9;
         }
 
         .falcon-table td:first-child span {
@@ -465,31 +626,31 @@ def inject_css():
             white-space: nowrap;
         }
 
-        .sig-buy-now { background: #9a1a2e; border-color: #ff8b6f; color: #fff3cc; font-weight: 900; box-shadow: 0 0 10px rgba(255, 123, 94, 0.28); }
-        .sig-buy { background: #124d34; border-color: #1f8056; color: #ddffef; }
-        .sig-watch { background: #3c3215; border-color: #665828; color: #dccb9f; }
-        .sig-pass { background: #1a212b; border-color: #2b394c; color: #7287a4; }
+        .sig-buy-now { background: #050505; border-color: #3ef08d; color: #e9fff0; font-weight: 900; box-shadow: none; }
+        .sig-buy { background: #111111; border-color: #2d8459; color: #e3fff1; }
+        .sig-watch { background: #111111; border-color: #476a4a; color: #d8f0d9; }
+        .sig-pass { background: #111111; border-color: #2c4737; color: #b6b6b6; }
 
-        .risk-low { background: #103f2d; color: #d6f7e8; }
-        .risk-medium { background: #5b4718; color: #ffeec9; }
-        .risk-high { background: #5f1f27; color: #ffd7dc; }
+        .risk-low { background: #111111; color: #d6f7e8; }
+        .risk-medium { background: #111111; color: #ecf8c8; }
+        .risk-high { background: #111111; color: #f0efc9; }
 
-        .heat-viral { background: #7a0018; color: #ffe9bf; }
-        .heat-hot { background: #8a2e00; color: #ffe9bf; }
-        .heat-warm { background: #6c5a25; color: #fff2ce; }
-        .heat-quiet { background: #29384f; color: #dce8f8; }
+        .heat-viral { background: #111111; color: #dcffdf; }
+        .heat-hot { background: #111111; color: #d7ffd8; }
+        .heat-warm { background: #111111; color: #d2f4d2; }
+        .heat-quiet { background: #111111; color: #c2c2c2; }
 
-        .score-90 { color: #ffae69; font-weight: 800; }
-        .score-70 { color: #7be2a7; font-weight: 700; }
-        .score-low { color: #c9d5e8; }
+        .score-90 { color: #75ffab; font-weight: 900; text-shadow: none; }
+        .score-70 { color: #95ffbb; font-weight: 800; }
+        .score-low { color: #cfe3d4; }
 
-        .move-pos { color: #7be2a7; font-weight: 800; }
-        .move-neg { color: #f27f89; font-weight: 800; }
-        .move-flat { color: #c9d5e8; }
+        .move-pos { color: #91ffb4; font-weight: 800; }
+        .move-neg { color: var(--bad); font-weight: 800; }
+        .move-flat { color: #cfe3d4; }
 
-        .row-buy-now td { background: rgba(122, 20, 40, 0.3); }
-        .row-buy-now td:first-child { box-shadow: inset 3px 0 0 #ff7b5e; }
-        .row-pass-subdued td { opacity: 0.44; }
+        .row-buy-now td { background: rgba(16, 16, 16, 0.92); }
+        .row-buy-now td:first-child { box-shadow: inset 3px 0 0 var(--ok); }
+        .row-pass-subdued td { opacity: 0.5; }
 
         .desktop-table .row-details {
             margin: 3px 0;
@@ -497,25 +658,25 @@ def inject_css():
         }
 
         .row-buy-now td:nth-child(2) .badge {
-            box-shadow: 0 0 8px rgba(226, 106, 88, 0.34);
+            box-shadow: none;
         }
 
         details.row-details {
             margin: 4px 0;
             padding: 5px 7px;
-            border: 1px solid #2b3b52;
-            border-radius: 8px;
-            background: #0f1723;
+            border: 1px solid var(--border-soft);
+            border-radius: 10px;
+            background: #000000;
         }
 
         details.row-details summary {
             cursor: pointer;
             font-size: 0.72rem;
-            color: #d8e5f9;
+            color: #c6ffdc;
             display: inline-block;
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            background: #0f1622;
+            border: 1px solid var(--border-soft);
+            border-radius: 7px;
+            background: #000000;
             padding: 2px 7px;
             font-weight: 700;
         }
@@ -528,24 +689,34 @@ def inject_css():
             font-size: 0.72rem;
         }
 
-        .detail-grid .label { color: #99abc5; }
-        .detail-grid .value { color: #e7edf7; }
+        .detail-grid .label { color: #a1f8c3; }
+        .detail-grid .value { color: #efefef; }
 
+        .mobile-only { display: none; }
         .mobile-cards { display: none; }
 
         @media (max-width: 980px) {
+            .fal-top-row,
+            .fal-bottom-row {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .mobile-only { display: flex; }
             .falcon-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); gap: 6px; margin-top: 4px; }
             .opps-grid { grid-template-columns: 1fr; }
             .desktop-table { display: none; }
             .mobile-cards { display: block; }
             .fal-table-wrap { max-height: none; }
-            .control-strip { padding: 4px 5px; margin-top: 3px; margin-bottom: 3px; }
-            .falcon-header { padding: 6px 8px; }
-            .opp-score { font-size: 1.55rem; }
+            .control-strip { padding: 4px 5px; margin-top: 2px; margin-bottom: 2px; }
+            .fal-title-wrap { min-height: 118px; padding: 0; }
+            .fal-header-image-wrap { min-height: 0; height: 100% !important; }
+            .fal-eye-img { width: 100% !important; height: 100% !important; max-width: none !important; object-fit: fill !important; transform: none; }
+            .opp-score { font-size: 1.7rem; }
+            .fal-nav-strip { width: 100%; justify-content: center; }
             .mobile-token {
-                border: 1px solid var(--border);
-                border-radius: 10px;
-                background: var(--panel);
+                border: 1px solid var(--border-soft);
+                border-radius: 12px;
+                background: #0b0b0b;
                 padding: 8px;
                 margin-bottom: 7px;
             }
@@ -742,6 +913,82 @@ def chart_link_href(token):
     return dexscreener_url
 
 
+def falcon_eye_state_class(high_priority_active=False):
+    return "high-priority" if high_priority_active else "normal"
+
+
+def token_pair_price_usd(token):
+    pair = ((token.get("raw_data") or {}).get("pair") or {})
+    if not isinstance(pair, dict):
+        return None
+    for key in ("priceUsd", "price_usd", "price"):
+        value = pair.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            price_value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if price_value > 0:
+            return price_value
+    return None
+
+
+def fmt_price(value):
+    if value is None:
+        return "N/A"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    if number <= 0:
+        return "N/A"
+    if number >= 1000:
+        return f"${number:,.2f}"
+    if number >= 1:
+        return f"${number:,.4f}".rstrip("0").rstrip(".")
+    return f"${number:.8f}".rstrip("0").rstrip(".")
+
+
+def nav_chip(label, href=None, active=False, dim=False):
+    classes = ["status-chip"]
+    if active:
+        classes.append("active")
+    if dim:
+        classes.append("dim")
+    class_name = " ".join(classes)
+    label_html = html.escape(label)
+    if href:
+        return f'<a class="{class_name}" href="{html.escape(href)}" target="_blank" rel="noopener noreferrer">{label_html}</a>'
+    return f'<span class="{class_name}">{label_html}</span>'
+
+
+def render_falcon_masthead(high_priority_active=False):
+    state_class = falcon_eye_state_class(high_priority_active)
+    eyes_asset = "assets/icons/falcon_eyes.png"
+    eyes_asset_path = Path(__file__).resolve().parent / eyes_asset
+    eyes_data_uri = ""
+    if eyes_asset_path.exists():
+        try:
+            encoded = base64.b64encode(eyes_asset_path.read_bytes()).decode("ascii")
+            eyes_data_uri = f"data:image/png;base64,{encoded}"
+        except OSError:
+            eyes_data_uri = ""
+    has_eyes_asset = bool(eyes_data_uri)
+    zone_class = f"fal-header-image-wrap {state_class}{'' if has_eyes_asset else ' no-image'}"
+    eyes_markup = f'<img class="fal-eye-img" src="{html.escape(eyes_data_uri)}" alt="" aria-hidden="true" />' if has_eyes_asset else ""
+    st.markdown(
+        f"""
+        <div class="fal-panel fal-title-wrap">
+            <div class="{zone_class}">
+                {eyes_markup}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_top_cards(tokens):
     top = sorted(tokens, key=lambda t: to_int(t.get("score", 0)), reverse=True)[:3]
     cards = []
@@ -754,6 +1001,7 @@ def render_top_cards(tokens):
         move = float(token.get("price_change_5m_pct", 0) or 0)
         card_class = "opp-card buy-now" if signal == "BUY NOW" else "opp-card"
         avatar = html.escape(symbol[:1] if symbol else "?")
+        price_display = fmt_price(token_pair_price_usd(token))
         cards.append(
             dedent(
                 f"""
@@ -769,9 +1017,14 @@ def render_top_cards(tokens):
                         <div class="opp-score {score_style(score)}">{score}<small>/100</small></div>
                     </div>
                     <div>{signal_badge(signal)}</div>
-                    <div class="opp-row"><span>MCap</span><span>{fmt_money(token.get('market_cap_usd', 0))}</span></div>
-                    <div class="opp-row"><span>Liq</span><span>{fmt_money(token.get('liquidity_usd', 0))}</span></div>
-                    <div class="opp-row"><span>5m</span><span class="{move_class(move)}">{move:+.2f}%</span></div>
+                    <div class="opp-metrics">
+                        <div class="opp-row"><span>Price</span><span>{html.escape(price_display)}</span></div>
+                        <div class="opp-row"><span>5m %</span><span class="{move_class(move)}">{move:+.2f}%</span></div>
+                        <div class="opp-row"><span>Liq</span><span>{fmt_money(token.get('liquidity_usd', 0))}</span></div>
+                        <div class="opp-row"><span>Vol 5m</span><span>{fmt_money(token.get('volume_5m_usd', 0))}</span></div>
+                        <div class="opp-row"><span>Age</span><span>{fmt_age_minutes(token.get('pair_age_minutes'))}</span></div>
+                        <div class="opp-row"><span>Risk</span><span>{html.escape(str(token.get('risk_label', 'HIGH')))}</span></div>
+                    </div>
                     <div class="opp-actions">
                         <button class="fal-btn" data-copy="{html.escape(contract)}">Copy</button>
                         <a class="fal-btn" href="{html.escape(chart_link_href(token))}" target="_blank">View on GMGN ↗</a>
@@ -874,6 +1127,7 @@ def render_mobile_cards(tokens):
         heat = str(token.get("social_heat", "⚪ QUIET"))
         move = float(token.get("price_change_5m_pct", 0) or 0)
         contract = str(token.get("contract_address", ""))
+        price_display = fmt_price(token_pair_price_usd(token))
         details = html.escape(", ".join(token.get("falcon_intelligence_reasons", []) or []))
         card = dedent(
             f"""
@@ -884,12 +1138,13 @@ def render_mobile_cards(tokens):
                 </div>
                 <div>{signal_badge(signal)} {risk_badge(str(token.get('risk_label', 'HIGH')))}</div>
                 <div class="mobile-grid">
-                    <div>MCap: {fmt_money(token.get('market_cap_usd', 0))}</div>
+                    <div>Price: {html.escape(price_display)}</div>
                     <div>Liq: {fmt_money(token.get('liquidity_usd', 0))}</div>
-                    <div>5m: <span class="{move_class(move)}">{move:+.2f}%</span></div>
+                    <div>Vol 5m: {fmt_money(token.get('volume_5m_usd', 0))}</div>
+                    <div>Age: {fmt_age_minutes(token.get('pair_age_minutes'))}</div>
                     <div>Smart: {html.escape(str(token.get('smart_wallet_display', '-')))}</div>
                     <div>Social: {heat_badge(heat)}</div>
-                    <div>Age: {fmt_age_minutes(token.get('pair_age_minutes'))}</div>
+                    <div>5m: <span class="{move_class(move)}">{move:+.2f}%</span></div>
                 </div>
                 <div class="mobile-actions">
                     <button class="fal-btn" data-copy="{html.escape(contract)}">Copy</button>
@@ -951,94 +1206,161 @@ def render_scanner_status(scanner_status, scanner_elapsed_ms):
     st.markdown(status_html, unsafe_allow_html=True)
 
 
-inject_css()
-inject_copy_script()
+def display_falcon():
+    inject_css()
+    inject_copy_script()
 
-left, right = st.columns([7, 3])
-with left:
+    platform_links = {
+        "x": os.getenv("FALCON_X_URL") or os.getenv("X_URL") or os.getenv("X_PROFILE_URL"),
+        "telegram": os.getenv("FALCON_TELEGRAM_URL") or os.getenv("TELEGRAM_URL"),
+        "discord": os.getenv("FALCON_DISCORD_URL") or os.getenv("DISCORD_URL"),
+    }
+
+    payload = st.session_state.get("scan_payload", {})
+    if payload and payload.get("ok") and payload.get("tokens"):
+        prefiltered = payload.get("tokens", [])
+        high_priority_active = any(
+            bool(token.get("high_priority_alert", False)) or str(token.get("signal", "")).upper() == "BUY NOW"
+            for token in prefiltered
+        )
+    else:
+        high_priority_active = False
+
+    st.markdown('<div class="fal-shell">', unsafe_allow_html=True)
+
+    render_falcon_masthead(high_priority_active=high_priority_active)
+
+    top_row_cols = st.columns([4, 2])
+    with top_row_cols[0]:
+        st.markdown(
+            '<div class="fal-status-left">'
+            + nav_chip('MISSION LIVE', active=True)
+            + nav_chip('SCANNER READY', active=True)
+            + nav_chip('GMGN', dim=True)
+            + '</div>',
+            unsafe_allow_html=True,
+        )
+    with top_row_cols[1]:
+        st.markdown(
+            '<div class="fal-status-right">'
+            + f'<a class="icon-chip" href="{html.escape(platform_links["x"] or "#")}" target="_blank" rel="noopener noreferrer" title="X">𝕏</a>'
+            + f'<a class="icon-chip" href="{html.escape(platform_links["telegram"] or "#")}" target="_blank" rel="noopener noreferrer" title="Telegram">✈</a>'
+            + f'<a class="icon-chip" href="{html.escape(platform_links["discord"] or "#")}" target="_blank" rel="noopener noreferrer" title="Discord">◎</a>'
+            + '<span class="icon-chip" title="Settings">⚙</span>'
+            + '</div>',
+            unsafe_allow_html=True,
+        )
+
+    bottom_row_cols = st.columns([4, 2])
+    with bottom_row_cols[0]:
+        st.markdown('<div class="control-strip">', unsafe_allow_html=True)
+        left_controls = st.columns([1.35, 1])
+        with left_controls[0]:
+            refresh_clicked = st.button("Refresh Scan", type="primary", use_container_width=True, key="falcon_refresh_scan")
+        with left_controls[1]:
+            live_mode = st.toggle("Live 2.5s", value=True, key="falcon_live_mode")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with bottom_row_cols[1]:
+        st.markdown('<div class="control-strip">', unsafe_allow_html=True)
+        test_telegram_clicked = st.button("TEST TELEGRAM ALERT", use_container_width=True, key="falcon_test_telegram_alert")
+        st.markdown('</div>', unsafe_allow_html=True)
+    if test_telegram_clicked:
+        sent_ok, sent_message = send_dashboard_test_telegram_alert()
+        if sent_ok:
+            st.success(sent_message)
+        else:
+            st.error(sent_message)
+
+    if live_mode:
+        inject_live_refresh(LIVE_REFRESH_MS)
+
+    payload = load_scan(force_refresh=refresh_clicked or live_mode)
+
+    if not payload.get("ok"):
+        st.error(payload.get("error", "Scan failed due to an unknown error."))
+        st.stop()
+
+    tokens = payload.get("tokens", [])
+    if not tokens:
+        st.info("No opportunities found in the latest scan.")
+        st.stop()
+
+    scan_time = format_scan_time(payload.get("scanned_at"))
+    st.markdown('<div class="fal-filter-shell">', unsafe_allow_html=True)
+    filter_cols = st.columns([2.1, 2.1, 1.2, 1.3])
+    with filter_cols[0]:
+        signal_filter = st.selectbox("Signal", ["ALL", "BUY NOW", "BUY", "WATCH", "PASS"], index=0, key="falcon_signal_filter")
+    with filter_cols[1]:
+        conviction_filter = st.selectbox("Conviction", ["ALL", "LEGENDARY", "ELITE", "STRONG", "WATCH"], index=0, key="falcon_conviction_filter")
+    with filter_cols[2]:
+        filtered_for_temp = tokens
+        if signal_filter != "ALL":
+            filtered_for_temp = [t for t in filtered_for_temp if str(t.get("signal", "PASS")).upper() == signal_filter]
+        if conviction_filter != "ALL":
+            filtered_for_temp = [t for t in filtered_for_temp if str(t.get("conviction_rating", "WATCH")).upper() == conviction_filter]
+        temperature = market_temperature(filtered_for_temp)
+        st.markdown('<div class="fal-filter-status">' + nav_chip(f"Market Temp {temperature}", active=True) + '</div>', unsafe_allow_html=True)
+    with filter_cols[3]:
+        st.markdown('<div class="fal-filter-status">' + nav_chip(f"Last Scan {scan_time}", dim=True) + '</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    filtered_tokens = tokens
+    if signal_filter != "ALL":
+        filtered_tokens = [t for t in filtered_tokens if str(t.get("signal", "PASS")).upper() == signal_filter]
+    if conviction_filter != "ALL":
+        filtered_tokens = [
+            t for t in filtered_tokens if str(t.get("conviction_rating", "WATCH")).upper() == conviction_filter
+        ]
+
+    filtered_tokens = sorted(filtered_tokens, key=lambda t: to_int(t.get("score", 0)), reverse=True)
+    if not filtered_tokens:
+        st.info("No opportunities match current filters.")
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.stop()
+
+    strongest = strongest_signal(filtered_tokens)
+    temperature = market_temperature(filtered_tokens)
+
     st.markdown(
-        '<div class="falcon-header">'
-        '<div class="falcon-brand">'
-        '<span class="falcon-eye">🦅</span>'
-        '<span class="falcon-title">FALCON AI HUNTER</span>'
-        '</div>'
-        '<div class="falcon-meta">'
-        '<span class="live-dot"></span><span class="meta-chip">LIVE</span>'
-        '<span class="meta-sep"></span>'
-        '<span class="meta-chip"><span class="muted">Mission</span>Terminal</span>'
-        '</div>'
-        '</div>',
+        '<div class="fal-nav-strip-wrap"><div class="fal-nav-strip">'
+        + nav_chip('X', platform_links['x'], active=bool(platform_links['x']))
+        + nav_chip('Telegram', platform_links['telegram'], active=bool(platform_links['telegram']))
+        + nav_chip('Discord', platform_links['discord'], active=bool(platform_links['discord']))
+        + nav_chip('Settings', '#', active=True)
+        + nav_chip('Normal', active=not any(bool(token.get("high_priority_alert", False)) for token in filtered_tokens), dim=any(bool(token.get("high_priority_alert", False)) for token in filtered_tokens))
+        + '</div></div>',
         unsafe_allow_html=True,
     )
 
-with right:
-    refresh_clicked = st.button("Refresh", type="primary", use_container_width=True)
-    live_mode = st.toggle("Live 2.5s", value=True)
-    test_telegram_clicked = st.button("TEST TELEGRAM ALERT", use_container_width=True)
+    st.markdown('<div class="section-title"><span>Top 3 Opportunities</span><span class="right">View All Opportunities →</span></div>', unsafe_allow_html=True)
 
-if test_telegram_clicked:
-    sent_ok, sent_message = send_dashboard_test_telegram_alert()
-    if sent_ok:
-        st.success(sent_message)
-    else:
-        st.error(sent_message)
+    render_top_cards(filtered_tokens)
 
-if live_mode:
-    inject_live_refresh(LIVE_REFRESH_MS)
+    summary_html = f"""
+    <div class="falcon-grid">
+        <div class="falcon-stat"><div class="k">Tokens Scanned</div><div class="v">{len(filtered_tokens)}</div></div>
+        <div class="falcon-stat"><div class="k">Strongest Signal</div><div class="v">{html.escape(strongest)}</div></div>
+        <div class="falcon-stat"><div class="k">New Tokens</div><div class="v">{to_int(payload.get('new_tokens_detected', 0))}</div></div>
+        <div class="falcon-stat"><div class="k">Last Scan</div><div class="v">{html.escape(scan_time)}</div></div>
+        <div class="falcon-stat"><div class="k">Market Temp</div><div class="v">{html.escape(temperature)}</div></div>
+        <div class="falcon-stat"><div class="k">BUY NOW</div><div class="v">{sum(1 for t in filtered_tokens if str(t.get('signal', '')).upper() == 'BUY NOW')}</div></div>
+        <div class="falcon-stat"><div class="k">High Priority</div><div class="v">{sum(1 for t in filtered_tokens if bool(t.get('high_priority_alert', False)))}</div></div>
+        <div class="falcon-stat"><div class="k">Avg Score</div><div class="v">{round(sum(to_int(t.get('score', 0)) for t in filtered_tokens) / len(filtered_tokens), 1)}</div></div>
+    </div>
+    """
+    st.markdown(summary_html, unsafe_allow_html=True)
 
-payload = load_scan(force_refresh=refresh_clicked or live_mode)
+    render_scanner_status(payload.get("scanner_status", []), payload.get("scanner_elapsed_ms", 0))
 
-if not payload.get("ok"):
-    st.error(payload.get("error", "Scan failed due to an unknown error."))
-    st.stop()
+    render_desktop_table(filtered_tokens)
+    render_mobile_cards(filtered_tokens)
 
-tokens = payload.get("tokens", [])
-if not tokens:
-    st.info("No opportunities found in the latest scan.")
-    st.stop()
+    st.markdown('</div>', unsafe_allow_html=True)
 
-signal_filter_col, conviction_filter_col = st.columns([1, 1])
-with signal_filter_col:
-    signal_filter = st.selectbox("Signal", ["ALL", "BUY NOW", "BUY", "WATCH", "PASS"], index=0)
-with conviction_filter_col:
-    conviction_filter = st.selectbox("Conviction", ["ALL", "LEGENDARY", "ELITE", "STRONG", "WATCH"], index=0)
 
-filtered_tokens = tokens
-if signal_filter != "ALL":
-    filtered_tokens = [t for t in filtered_tokens if str(t.get("signal", "PASS")).upper() == signal_filter]
-if conviction_filter != "ALL":
-    filtered_tokens = [
-        t for t in filtered_tokens if str(t.get("conviction_rating", "WATCH")).upper() == conviction_filter
-    ]
+def live_falcon():
+    display_falcon()
 
-filtered_tokens = sorted(filtered_tokens, key=lambda t: to_int(t.get("score", 0)), reverse=True)
-if not filtered_tokens:
-    st.info("No opportunities match current filters.")
-    st.stop()
 
-scan_time = format_scan_time(payload.get("scanned_at"))
-strongest = strongest_signal(filtered_tokens)
-temperature = market_temperature(filtered_tokens)
-
-st.markdown('<div class="section-title"><span>Top 3 Opportunities</span><span class="right">View All Opportunities →</span></div>', unsafe_allow_html=True)
-
-render_top_cards(filtered_tokens)
-
-summary_html = f"""
-<div class="falcon-grid">
-    <div class="falcon-stat"><div class="k">Tokens Scanned</div><div class="v">{len(filtered_tokens)}</div></div>
-    <div class="falcon-stat"><div class="k">Strongest Signal</div><div class="v">{html.escape(strongest)}</div></div>
-    <div class="falcon-stat"><div class="k">New Tokens</div><div class="v">{to_int(payload.get('new_tokens_detected', 0))}</div></div>
-    <div class="falcon-stat"><div class="k">Last Scan</div><div class="v">{html.escape(scan_time)}</div></div>
-    <div class="falcon-stat"><div class="k">Market Temp</div><div class="v">{html.escape(temperature)}</div></div>
-    <div class="falcon-stat"><div class="k">BUY NOW</div><div class="v">{sum(1 for t in filtered_tokens if str(t.get('signal', '')).upper() == 'BUY NOW')}</div></div>
-    <div class="falcon-stat"><div class="k">High Priority</div><div class="v">{sum(1 for t in filtered_tokens if bool(t.get('high_priority_alert', False)))}</div></div>
-    <div class="falcon-stat"><div class="k">Avg Score</div><div class="v">{round(sum(to_int(t.get('score', 0)) for t in filtered_tokens) / len(filtered_tokens), 1)}</div></div>
-</div>
-"""
-st.markdown(summary_html, unsafe_allow_html=True)
-
-render_scanner_status(payload.get("scanner_status", []), payload.get("scanner_elapsed_ms", 0))
-
-render_desktop_table(filtered_tokens)
-render_mobile_cards(filtered_tokens)
+if __name__ == "__main__":
+    live_falcon()
