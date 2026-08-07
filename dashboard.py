@@ -734,6 +734,14 @@ def move_class(value):
     return "move-flat"
 
 
+def chart_link_href(token):
+    dexscreener_url = str(token.get("dexscreener_url", "") or "")
+    contract = str(token.get("contract_address", "") or "").strip()
+    if contract and contract.upper() != "N/A" and "/solana/" in dexscreener_url.lower():
+        return f"https://gmgn.ai/sol/token/{contract}"
+    return dexscreener_url
+
+
 def render_top_cards(tokens):
     top = sorted(tokens, key=lambda t: to_int(t.get("score", 0)), reverse=True)[:3]
     cards = []
@@ -766,7 +774,7 @@ def render_top_cards(tokens):
                     <div class="opp-row"><span>5m</span><span class="{move_class(move)}">{move:+.2f}%</span></div>
                     <div class="opp-actions">
                         <button class="fal-btn" data-copy="{html.escape(contract)}">Copy</button>
-                        <a class="fal-btn" href="{html.escape(str(token.get('dexscreener_url', '') or ''))}" target="_blank">Chart</a>
+                        <a class="fal-btn" href="{html.escape(chart_link_href(token))}" target="_blank">View on GMGN ↗</a>
                     </div>
                 </div>
                 """
@@ -795,7 +803,7 @@ def render_desktop_table(tokens):
             row_state = ' class="row-pass-subdued"'
         action_html = (
             f'<button class="fal-btn" data-copy="{html.escape(contract)}">Copy</button> '
-            f'<a class="fal-btn" href="{html.escape(str(token.get("dexscreener_url", "") or ""))}" target="_blank">Chart</a>'
+            f'<a class="fal-btn" href="{html.escape(chart_link_href(token))}" target="_blank">View on GMGN ↗</a>'
         )
 
         row = dedent(
@@ -832,7 +840,7 @@ def render_desktop_table(tokens):
                             <div class="label">BUY NOW Reasons</div><div class="value">{html.escape(', '.join(token.get('buy_now_reasons', []) or []))}</div>
                             <div class="label">Priority Reasons</div><div class="value">{html.escape(', '.join(token.get('high_priority_reasons', []) or []))}</div>
                             <div class="label">Transactions</div><div class="value">Buys {to_int(token.get('buys_5m', 0))}, Sells {to_int(token.get('sells_5m', 0))}</div>
-                            <div class="label">DexScreener</div><div class="value"><a class="fal-btn" href="{html.escape(str(token.get('dexscreener_url', '') or ''))}" target="_blank">Open Chart</a></div>
+                            <div class="label">DexScreener</div><div class="value"><a class="fal-btn" href="{html.escape(chart_link_href(token))}" target="_blank">View on GMGN ↗</a></div>
                             <div class="label">Copy Contract</div><div class="value"><button class="fal-btn" data-copy="{html.escape(contract)}">Copy</button></div>
                             <div class="label">High Priority</div><div class="value">{html.escape(high_priority)}</div>
                             <div class="label">Social Heat Score</div><div class="value">{to_int(token.get('social_heat_score', 0))}</div>
@@ -885,7 +893,7 @@ def render_mobile_cards(tokens):
                 </div>
                 <div class="mobile-actions">
                     <button class="fal-btn" data-copy="{html.escape(contract)}">Copy</button>
-                    <a class="fal-btn" href="{html.escape(str(token.get('dexscreener_url', '') or ''))}" target="_blank">Chart</a>
+                    <a class="fal-btn" href="{html.escape(chart_link_href(token))}" target="_blank">View on GMGN ↗</a>
                 </div>
                 <details class="row-details">
                     <summary>Details</summary>
