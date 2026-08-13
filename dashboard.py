@@ -8,7 +8,13 @@ from pathlib import Path
 import requests
 import streamlit as st
 
-from Scanner import scan_tokens
+from Scanner import (
+    apply_surge_settings,
+    get_default_surge_settings,
+    get_surge_settings,
+    reset_surge_settings,
+    scan_tokens,
+)
 
 st.set_page_config(page_title="Falcon", page_icon="🦅", layout="wide")
 
@@ -1322,6 +1328,176 @@ def render_scanner_status(scanner_status, scanner_elapsed_ms):
     st.markdown(status_html, unsafe_allow_html=True)
 
 
+def _surge_settings_form_key():
+    return "falcon_surge_settings_form"
+
+
+def _surge_field_key(name):
+    return f"falcon_surge_{name}"
+
+
+def _initialize_surge_form_state(settings):
+    for key, value in settings.items():
+        state_key = _surge_field_key(key)
+        if state_key not in st.session_state:
+            st.session_state[state_key] = value
+
+
+def _read_surge_form_state():
+    return {
+        "enabled": bool(st.session_state.get(_surge_field_key("enabled"), True)),
+        "min_market_cap_usd": float(st.session_state.get(_surge_field_key("min_market_cap_usd"), 100000.0)),
+        "max_market_cap_usd": float(st.session_state.get(_surge_field_key("max_market_cap_usd"), 2000000.0)),
+        "min_liquidity_usd": float(st.session_state.get(_surge_field_key("min_liquidity_usd"), 20000.0)),
+        "watch_min_mc_change_pct": float(st.session_state.get(_surge_field_key("watch_min_mc_change_pct"), 15.0)),
+        "watch_min_buy_pressure_ratio": float(st.session_state.get(_surge_field_key("watch_min_buy_pressure_ratio"), 1.0)),
+        "surge_min_mc_change_pct": float(st.session_state.get(_surge_field_key("surge_min_mc_change_pct"), 25.0)),
+        "surge_min_volume_accel": float(st.session_state.get(_surge_field_key("surge_min_volume_accel"), 1.35)),
+        "surge_min_buy_pressure_ratio": float(st.session_state.get(_surge_field_key("surge_min_buy_pressure_ratio"), 1.0)),
+        "surge_min_liquidity_usd": float(st.session_state.get(_surge_field_key("surge_min_liquidity_usd"), 20000.0)),
+        "breakout_min_mc_change_pct": float(st.session_state.get(_surge_field_key("breakout_min_mc_change_pct"), 50.0)),
+        "breakout_min_volume_accel": float(st.session_state.get(_surge_field_key("breakout_min_volume_accel"), 1.8)),
+        "breakout_min_buy_pressure_ratio": float(st.session_state.get(_surge_field_key("breakout_min_buy_pressure_ratio"), 1.2)),
+        "breakout_min_liquidity_usd": float(st.session_state.get(_surge_field_key("breakout_min_liquidity_usd"), 25000.0)),
+        "alerts_enabled": bool(st.session_state.get(_surge_field_key("alerts_enabled"), True)),
+        "alert_on_surge": bool(st.session_state.get(_surge_field_key("alert_on_surge"), True)),
+        "alert_on_breakout": bool(st.session_state.get(_surge_field_key("alert_on_breakout"), True)),
+        "alert_cooldown_minutes": int(st.session_state.get(_surge_field_key("alert_cooldown_minutes"), 8)),
+        "alert_reset_minutes": int(st.session_state.get(_surge_field_key("alert_reset_minutes"), 35)),
+    }
+
+
+def _validate_surge_settings(settings):
+    errors = []
+    if settings["min_market_cap_usd"] > settings["max_market_cap_usd"]:
+        errors.append("Minimum Market Cap cannot be greater than Maximum Market Cap.")
+
+    numeric_non_negative = [
+        "min_market_cap_usd",
+        "max_market_cap_usd",
+        "min_liquidity_usd",
+        "watch_min_mc_change_pct",
+        "watch_min_buy_pressure_ratio",
+        "surge_min_mc_change_pct",
+        "surge_min_volume_accel",
+        "surge_min_buy_pressure_ratio",
+        "surge_min_liquidity_usd",
+        "breakout_min_mc_change_pct",
+        "breakout_min_volume_accel",
+        "breakout_min_buy_pressure_ratio",
+        "breakout_min_liquidity_usd",
+        "alert_cooldown_minutes",
+        "alert_reset_minutes",
+    ]
+    for key in numeric_non_negative:
+        if settings[key] < 0:
+            errors.append(f"{key} cannot be negative.")
+
+    if settings["breakout_min_mc_change_pct"] < settings["surge_min_mc_change_pct"]:
+        errors.append("BREAKOUT minimum MC Change % cannot be weaker than SURGE.")
+    if settings["breakout_min_volume_accel"] < settings["surge_min_volume_accel"]:
+        errors.append("BREAKOUT minimum Volume Acceleration cannot be weaker than SURGE.")
+    if settings["breakout_min_buy_pressure_ratio"] < settings["surge_min_buy_pressure_ratio"]:
+        errors.append("BREAKOUT minimum Buy Pressure cannot be weaker than SURGE.")
+    if settings["breakout_min_liquidity_usd"] < settings["surge_min_liquidity_usd"]:
+        errors.append("BREAKOUT minimum Liquidity cannot be weaker than SURGE.")
+
+    if settings["alert_cooldown_minutes"] < 1:
+        errors.append("Alert cooldown must be at least 1 minute.")
+    if settings["alert_reset_minutes"] < 1:
+        errors.append("Reset time must be at least 1 minute.")
+
+    return errors
+
+
+def render_surge_settings_panel():
+    active_settings = get_surge_settings()
+    default_settings = get_default_surge_settings()
+    _initialize_surge_form_state(active_settings)
+
+    with st.expander("⚡ Surge Settings", expanded=False):
+        st.caption("WATCH = interesting acceleration, monitor only")
+        st.caption("SURGE = strong acceleration, Telegram alert")
+        st.caption("BREAKOUT = exceptional acceleration, urgent Telegram alert")
+
+        st.toggle("Enable Surge Detector", key=_surge_field_key("enabled"))
+
+        st.markdown("**Candidate Filters**")
+        candidate_cols = st.columns(3)
+        with candidate_cols[0]:
+            st.number_input("Minimum Market Cap", min_value=0.0, step=10000.0, format="%.0f", key=_surge_field_key("min_market_cap_usd"))
+        with candidate_cols[1]:
+            st.number_input("Maximum Market Cap", min_value=0.0, step=10000.0, format="%.0f", key=_surge_field_key("max_market_cap_usd"))
+        with candidate_cols[2]:
+            st.number_input("Minimum Liquidity", min_value=0.0, step=1000.0, format="%.0f", key=_surge_field_key("min_liquidity_usd"))
+
+        st.markdown("**WATCH**")
+        watch_cols = st.columns(2)
+        with watch_cols[0]:
+            st.number_input("Minimum MC Change %", min_value=0.0, step=0.5, format="%.2f", key=_surge_field_key("watch_min_mc_change_pct"))
+        with watch_cols[1]:
+            st.number_input("Minimum Buy Pressure", min_value=0.0, step=0.05, format="%.2f", key=_surge_field_key("watch_min_buy_pressure_ratio"))
+
+        st.markdown("**SURGE**")
+        surge_cols = st.columns(4)
+        with surge_cols[0]:
+            st.number_input("Minimum MC Change % ", min_value=0.0, step=0.5, format="%.2f", key=_surge_field_key("surge_min_mc_change_pct"))
+        with surge_cols[1]:
+            st.number_input("Minimum Volume Acceleration", min_value=0.0, step=0.05, format="%.2f", key=_surge_field_key("surge_min_volume_accel"))
+        with surge_cols[2]:
+            st.number_input("Minimum Buy Pressure ", min_value=0.0, step=0.05, format="%.2f", key=_surge_field_key("surge_min_buy_pressure_ratio"))
+        with surge_cols[3]:
+            st.number_input("Minimum Liquidity ", min_value=0.0, step=1000.0, format="%.0f", key=_surge_field_key("surge_min_liquidity_usd"))
+
+        st.markdown("**BREAKOUT**")
+        breakout_cols = st.columns(4)
+        with breakout_cols[0]:
+            st.number_input("Minimum MC Change %  ", min_value=0.0, step=0.5, format="%.2f", key=_surge_field_key("breakout_min_mc_change_pct"))
+        with breakout_cols[1]:
+            st.number_input("Minimum Volume Acceleration ", min_value=0.0, step=0.05, format="%.2f", key=_surge_field_key("breakout_min_volume_accel"))
+        with breakout_cols[2]:
+            st.number_input("Minimum Buy Pressure  ", min_value=0.0, step=0.05, format="%.2f", key=_surge_field_key("breakout_min_buy_pressure_ratio"))
+        with breakout_cols[3]:
+            st.number_input("Minimum Liquidity  ", min_value=0.0, step=1000.0, format="%.0f", key=_surge_field_key("breakout_min_liquidity_usd"))
+
+        st.markdown("**Alert Controls**")
+        alert_cols = st.columns(4)
+        with alert_cols[0]:
+            st.toggle("Enable SURGE Telegram alerts", key=_surge_field_key("alert_on_surge"))
+        with alert_cols[1]:
+            st.toggle("Enable BREAKOUT Telegram alerts", key=_surge_field_key("alert_on_breakout"))
+        with alert_cols[2]:
+            st.number_input("Alert cooldown", min_value=1, step=1, key=_surge_field_key("alert_cooldown_minutes"))
+        with alert_cols[3]:
+            st.number_input("Reset time", min_value=1, step=1, key=_surge_field_key("alert_reset_minutes"))
+
+        st.toggle("Enable surge Telegram dispatch", key=_surge_field_key("alerts_enabled"))
+
+        action_cols = st.columns(2)
+        apply_clicked = action_cols[0].button("Apply Settings", use_container_width=True, key="falcon_surge_apply")
+        reset_clicked = action_cols[1].button("Reset to Defaults", use_container_width=True, key="falcon_surge_reset")
+
+        if apply_clicked:
+            pending = _read_surge_form_state()
+            validation_errors = _validate_surge_settings(pending)
+            if validation_errors:
+                for message in validation_errors:
+                    st.error(message)
+            else:
+                applied = apply_surge_settings(pending)
+                for key, value in applied.items():
+                    st.session_state[_surge_field_key(key)] = value
+                st.success("Surge settings applied and saved locally.")
+                st.session_state.scan_payload = scan_tokens()
+
+        if reset_clicked:
+            reset_values = reset_surge_settings()
+            for key, value in reset_values.items():
+                st.session_state[_surge_field_key(key)] = value
+            st.success("Surge settings reset to defaults.")
+            st.session_state.scan_payload = scan_tokens()
+
+
 def display_falcon():
     inject_css()
     inject_copy_script()
@@ -1389,6 +1565,8 @@ def display_falcon():
 
     if live_mode:
         inject_live_refresh(LIVE_REFRESH_MS)
+
+    render_surge_settings_panel()
 
     payload = load_scan(force_refresh=refresh_clicked or live_mode)
 

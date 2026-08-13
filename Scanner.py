@@ -5,7 +5,13 @@ from pathlib import Path
 
 
 from falcon_alerts import create_default_alert_engine
-from falcon_surge import create_default_surge_engine, evaluate_surge
+from falcon_surge import (
+    apply_surge_settings as _apply_surge_settings,
+    create_default_surge_engine,
+    evaluate_surge,
+    get_default_surge_settings as _get_default_surge_settings,
+    reset_surge_settings as _reset_surge_settings,
+)
 from social_intelligence import SocialContext, create_default_social_engine
 from source_scanner import collect_all_candidates
 
@@ -1596,6 +1602,46 @@ def scan_tokens(max_tokens=200, top_n=30):
 def send_test_alert():
     """Trigger a safe Falcon TEST ALERT to validate Telegram connectivity."""
     return ALERT_ENGINE.send_test_alert()
+
+
+def get_surge_settings():
+    """Return active surge settings currently applied to the runtime engine."""
+    return {
+        "enabled": bool(SURGE_ENGINE.config.enabled),
+        "min_market_cap_usd": float(SURGE_ENGINE.config.min_market_cap_usd),
+        "max_market_cap_usd": float(SURGE_ENGINE.config.max_market_cap_usd),
+        "min_liquidity_usd": float(SURGE_ENGINE.config.min_liquidity_usd),
+        "watch_min_mc_change_pct": float(SURGE_ENGINE.config.watch_min_mc_change_pct),
+        "watch_min_buy_pressure_ratio": float(SURGE_ENGINE.config.watch_min_buy_pressure_ratio),
+        "surge_min_mc_change_pct": float(SURGE_ENGINE.config.surge_min_mc_change_pct),
+        "surge_min_volume_accel": float(SURGE_ENGINE.config.surge_min_volume_accel),
+        "surge_min_buy_pressure_ratio": float(SURGE_ENGINE.config.surge_min_buy_pressure_ratio),
+        "surge_min_liquidity_usd": float(SURGE_ENGINE.config.surge_min_liquidity_usd),
+        "breakout_min_mc_change_pct": float(SURGE_ENGINE.config.breakout_min_mc_change_pct),
+        "breakout_min_volume_accel": float(SURGE_ENGINE.config.breakout_min_volume_accel),
+        "breakout_min_buy_pressure_ratio": float(SURGE_ENGINE.config.breakout_min_buy_pressure_ratio),
+        "breakout_min_liquidity_usd": float(SURGE_ENGINE.config.breakout_min_liquidity_usd),
+        "alerts_enabled": bool(SURGE_ENGINE.config.alerts_enabled),
+        "alert_on_surge": bool(SURGE_ENGINE.config.alert_on_surge),
+        "alert_on_breakout": bool(SURGE_ENGINE.config.alert_on_breakout),
+        "alert_cooldown_minutes": int(SURGE_ENGINE.config.alert_cooldown_minutes),
+        "alert_reset_minutes": int(SURGE_ENGINE.config.alert_reset_minutes),
+    }
+
+
+def get_default_surge_settings():
+    """Return default surge settings derived from environment/default values."""
+    return _get_default_surge_settings()
+
+
+def apply_surge_settings(settings):
+    """Apply and persist surge settings for subsequent scans."""
+    return _apply_surge_settings(SURGE_ENGINE, settings=settings, persist=True)
+
+
+def reset_surge_settings():
+    """Reset surge settings to defaults and persist them."""
+    return _reset_surge_settings(SURGE_ENGINE, persist=True)
 
 
 def main():

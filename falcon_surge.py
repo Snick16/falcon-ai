@@ -1,9 +1,10 @@
 import json
 import os
+from dataclasses import asdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import certifi
 import requests
@@ -11,6 +12,7 @@ import requests
 
 MEMORY_DIR = Path(__file__).resolve().parent / ".falcon_memory"
 SURGE_STATE_FILE = MEMORY_DIR / "surge_state.json"
+SURGE_SETTINGS_FILE = MEMORY_DIR / "surge_settings.json"
 ENV_FILE = Path(__file__).resolve().parent / ".env"
 TELEGRAM_SEND_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
@@ -109,7 +111,10 @@ class SurgeConfig:
     breakout_min_liquidity_usd: float = 25_000
 
     watch_min_mc_change_pct: float = 15.0
+    watch_min_buy_pressure_ratio: float = 1.0
     surge_min_mc_change_pct: float = 25.0
+    surge_min_liquidity_usd: float = 20_000
+    surge_min_buy_pressure_ratio: float = 1.0
     breakout_min_mc_change_pct: float = 50.0
 
     surge_min_volume_accel: float = 1.35
@@ -122,6 +127,8 @@ class SurgeConfig:
     breakout_focus_1m_usd: float = 1_000_000
 
     alerts_enabled: bool = False
+    alert_on_surge: bool = True
+    alert_on_breakout: bool = True
     alert_dry_run: bool = True
     alert_cooldown_minutes: int = 8
     alert_reset_minutes: int = 35
@@ -194,7 +201,11 @@ def evaluate_surge(
     reasons: List[str] = []
 
     if in_candidate_range:
-        if market_cap_change_pct >= config.watch_min_mc_change_pct and buy_pressure_positive:
+        if (
+            market_cap_change_pct >= config.watch_min_mc_change_pct
+            and buy_pressure_positive
+            and buy_pressure_ratio >= config.watch_min_buy_pressure_ratio
+        ):
             level = "WATCH"
             reasons.append("market cap acceleration is above WATCH threshold")
             reasons.append("buy pressure is positive")
@@ -202,8 +213,9 @@ def evaluate_surge(
         if (
             market_cap_change_pct >= config.surge_min_mc_change_pct
             and volume_acceleration >= config.surge_min_volume_accel
+            and buy_pressure_ratio >= config.surge_min_buy_pressure_ratio
             and buy_pressure_positive
-            and liquidity >= config.min_liquidity_usd
+            and liquidity >= config.surge_min_liquidity_usd
         ):
             level = "SURGE"
             reasons = [
@@ -424,6 +436,14 @@ class FalconSurgeEngine:
                 contracts[contract] = entry
                 continue
 
+            if level == "SURGE" and not self.config.alert_on_surge:
+                contracts[contract] = entry
+                continue
+
+            if level == "BREAKOUT" and not self.config.alert_on_breakout:
+                contracts[contract] = entry
+                continue
+
             report.qualified += 1
             current_rank = _level_rank(level)
             alerted_level = str(entry.get("last_level_alerted", "NONE") or "NONE").upper()
@@ -458,25 +478,155 @@ class FalconSurgeEngine:
         return report
 
 
-def create_default_surge_engine() -> FalconSurgeEngine:
-    config = SurgeConfig(
+def _default_surge_config() -> SurgeConfig:
+    return SurgeConfig(
         enabled=_to_bool(_get_setting("FALCON_SURGE_ENABLED", "1"), True),
         min_market_cap_usd=_to_float(_get_setting("FALCON_SURGE_MIN_MC_USD", "100000"), 100000),
         max_market_cap_usd=_to_float(_get_setting("FALCON_SURGE_MAX_MC_USD", "2000000"), 2000000),
         min_liquidity_usd=_to_float(_get_setting("FALCON_SURGE_MIN_LIQ_USD", "20000"), 20000),
         breakout_min_liquidity_usd=_to_float(_get_setting("FALCON_SURGE_BREAKOUT_MIN_LIQ_USD", "25000"), 25000),
         watch_min_mc_change_pct=_to_float(_get_setting("FALCON_SURGE_WATCH_MC_CHANGE_PCT", "15"), 15),
+        watch_min_buy_pressure_ratio=_to_float(_get_setting("FALCON_SURGE_WATCH_MIN_BUY_PRESSURE", "1.0"), 1.0),
         surge_min_mc_change_pct=_to_float(_get_setting("FALCON_SURGE_SURGE_MC_CHANGE_PCT", "25"), 25),
-        breakout_min_mc_change_pct=_to_float(_get_setting("FALCON_SURGE_BREAKOUT_MC_CHANGE_PCT", "50"), 50),
+        surge_min_liquidity_usd=_to_float(_get_setting("FALCON_SURGE_SURGE_MIN_LIQ_USD", "20000"), 20000),
         surge_min_volume_accel=_to_float(_get_setting("FALCON_SURGE_MIN_VOLUME_ACCEL", "1.35"), 1.35),
+        surge_min_buy_pressure_ratio=_to_float(_get_setting("FALCON_SURGE_SURGE_MIN_BUY_PRESSURE", "1.0"), 1.0),
+        breakout_min_mc_change_pct=_to_float(_get_setting("FALCON_SURGE_BREAKOUT_MC_CHANGE_PCT", "50"), 50),
         breakout_min_volume_accel=_to_float(_get_setting("FALCON_SURGE_BREAKOUT_MIN_VOLUME_ACCEL", "1.8"), 1.8),
         breakout_min_buy_pressure_ratio=_to_float(_get_setting("FALCON_SURGE_BREAKOUT_MIN_BUY_PRESSURE", "1.2"), 1.2),
         breakout_focus_near_500k_usd=_to_float(_get_setting("FALCON_SURGE_FOCUS_NEAR_500K", "450000"), 450000),
         breakout_focus_500k_usd=_to_float(_get_setting("FALCON_SURGE_FOCUS_500K", "500000"), 500000),
         breakout_focus_1m_usd=_to_float(_get_setting("FALCON_SURGE_FOCUS_1M", "1000000"), 1000000),
         alerts_enabled=_to_bool(_get_setting("FALCON_SURGE_ALERTS_ENABLED", "1"), True),
+        alert_on_surge=_to_bool(_get_setting("FALCON_SURGE_ALERT_ON_SURGE", "1"), True),
+        alert_on_breakout=_to_bool(_get_setting("FALCON_SURGE_ALERT_ON_BREAKOUT", "1"), True),
         alert_dry_run=_to_bool(_get_setting("FALCON_SURGE_ALERT_DRY_RUN", _get_setting("FALCON_ALERT_DRY_RUN", "1")), True),
         alert_cooldown_minutes=_to_int(_get_setting("FALCON_SURGE_ALERT_COOLDOWN_MINUTES", "8"), 8),
         alert_reset_minutes=_to_int(_get_setting("FALCON_SURGE_ALERT_RESET_MINUTES", "35"), 35),
     )
+
+
+def _settings_allowed_keys() -> List[str]:
+    return [
+        "enabled",
+        "min_market_cap_usd",
+        "max_market_cap_usd",
+        "min_liquidity_usd",
+        "watch_min_mc_change_pct",
+        "watch_min_buy_pressure_ratio",
+        "surge_min_mc_change_pct",
+        "surge_min_volume_accel",
+        "surge_min_buy_pressure_ratio",
+        "surge_min_liquidity_usd",
+        "breakout_min_mc_change_pct",
+        "breakout_min_volume_accel",
+        "breakout_min_buy_pressure_ratio",
+        "breakout_min_liquidity_usd",
+        "alerts_enabled",
+        "alert_on_surge",
+        "alert_on_breakout",
+        "alert_cooldown_minutes",
+        "alert_reset_minutes",
+    ]
+
+
+def _load_persisted_settings() -> Dict[str, object]:
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    if not SURGE_SETTINGS_FILE.exists():
+        return {}
+    try:
+        with SURGE_SETTINGS_FILE.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    allowed = set(_settings_allowed_keys())
+    return {
+        key: value
+        for key, value in payload.items()
+        if key in allowed
+    }
+
+
+def _save_persisted_settings(settings: Dict[str, object]) -> None:
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    allowed = set(_settings_allowed_keys())
+    payload = {
+        key: settings[key]
+        for key in sorted(settings.keys())
+        if key in allowed
+    }
+    with SURGE_SETTINGS_FILE.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=True)
+
+
+def _cast_settings(values: Dict[str, object]) -> Dict[str, object]:
+    bool_keys = {
+        "enabled",
+        "alerts_enabled",
+        "alert_on_surge",
+        "alert_on_breakout",
+    }
+    int_keys = {
+        "alert_cooldown_minutes",
+        "alert_reset_minutes",
+    }
+
+    casted: Dict[str, object] = {}
+    for key in _settings_allowed_keys():
+        if key not in values:
+            continue
+        raw = values[key]
+        if key in bool_keys:
+            casted[key] = bool(raw)
+            continue
+        if key in int_keys:
+            casted[key] = _to_int(raw)
+            continue
+        casted[key] = _to_float(raw)
+    return casted
+
+
+def _config_to_settings(config: SurgeConfig) -> Dict[str, object]:
+    serialized = asdict(config)
+    return {
+        key: serialized[key]
+        for key in _settings_allowed_keys()
+        if key in serialized
+    }
+
+
+def get_default_surge_settings() -> Dict[str, object]:
+    return _config_to_settings(_default_surge_config())
+
+
+def get_effective_surge_settings() -> Dict[str, object]:
+    defaults = _config_to_settings(_default_surge_config())
+    persisted = _cast_settings(_load_persisted_settings())
+    defaults.update(persisted)
+    return defaults
+
+
+def apply_surge_settings(engine: FalconSurgeEngine, settings: Dict[str, object], persist: bool = True) -> Dict[str, object]:
+    updated = _cast_settings(settings)
+    current = _config_to_settings(engine.config)
+    current.update(updated)
+    engine.config = SurgeConfig(**current)
+    if persist:
+        _save_persisted_settings(_config_to_settings(engine.config))
+    return _config_to_settings(engine.config)
+
+
+def reset_surge_settings(engine: FalconSurgeEngine, persist: bool = True) -> Dict[str, object]:
+    defaults = _config_to_settings(_default_surge_config())
+    engine.config = SurgeConfig(**defaults)
+    if persist:
+        _save_persisted_settings(defaults)
+    return defaults
+
+
+def create_default_surge_engine() -> FalconSurgeEngine:
+    settings = get_effective_surge_settings()
+    config = SurgeConfig(**settings)
     return FalconSurgeEngine(config)
