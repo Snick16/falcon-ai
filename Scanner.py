@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+
 from falcon_alerts import create_default_alert_engine
 from social_intelligence import SocialContext, create_default_social_engine
 from source_scanner import collect_all_candidates
@@ -19,6 +20,62 @@ MAX_SNAPSHOTS = 500
 SOCIAL_ENGINE = create_default_social_engine()
 ALERT_ENGINE = create_default_alert_engine()
 
+FALCON_SCORING_CONFIG = {
+    "confirmation": {
+        "sources": {
+            "axiom": ("axiom", "axiom.trade"),
+            "gmgn": ("gmgn", "gmgn.ai"),
+            "photon": ("photon", "photon-sol", "photon-sol.tinyastro.io"),
+        },
+        "score_by_count": {
+            0: 0,
+            1: 5,
+            2: 12,
+            3: 20,
+        },
+    },
+    "weights": {
+        "market_baseline": 0.52,
+        "intelligence": 0.28,
+    },
+    "acceleration": {
+        "volume_growth_1_2x": 4,
+        "volume_growth_1_8x": 8,
+        "volume_growth_2_5x": 12,
+        "buy_pressure_light": 4,
+        "buy_pressure_strong": 8,
+        "buy_pressure_extreme": 11,
+        "price_positive": 2,
+        "price_strong": 4,
+    },
+    "social": {
+        "hot_with_market_confirmation": 8,
+        "viral_with_market_confirmation": 12,
+    },
+    "early_opportunity": {
+        "max_age_minutes": 40,
+        "required_volume_growth": 1.8,
+        "bonus": 8,
+    },
+    "safety_penalties": {
+        "low_liquidity": 9,
+        "high_risk": 8,
+        "holder_concentration_70": 10,
+        "holder_concentration_85": 18,
+        "sniper_like": 8,
+        "rug_like": 10,
+    },
+    "signal": {
+        "watch_min": 58,
+        "buy_min": 72,
+        "buy_now_min": 90,
+        "high_priority_min": 92,
+        "min_confirmation_for_buy": 2,
+        "min_confirmation_for_buy_now": 2,
+        "min_confirmation_for_high_priority": 2,
+    },
+}
+
 
 def safe_number(value):
     """Convert missing or invalid numbers to zero."""
@@ -26,6 +83,252 @@ def safe_number(value):
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _clamp_int(value, low=0, high=100):
+    return int(max(low, min(int(round(value)), high)))
+
+
+def _to_compact_text(value):
+    return str(value or "").strip().lower()
+
+
+def _contains_keyword(haystack, keywords):
+    text = _to_compact_text(haystack)
+    if not text:
+        return False
+    for keyword in keywords:
+        if _to_compact_text(keyword) and _to_compact_text(keyword) in text:
+            return True
+    return False
+
+
+def derive_source_confirmation(candidate):
+    """Return per-source confirmation flags using explicit collector tags/flags."""
+    raw_data = (candidate or {}).get("raw_data") or {}
+    source_names = list(raw_data.get("found_by", [])) or [str((candidate or {}).get("source", "unknown"))]
+    explicit_flags = raw_data.get("source_confirmations") if isinstance(raw_data, dict) else None
+    config_sources = FALCON_SCORING_CONFIG["confirmation"]["sources"]
+
+    if isinstance(explicit_flags, dict):
+        flags = {
+            source_key: bool(explicit_flags.get(source_key, False))
+            for source_key in config_sources.keys()
+        }
+    else:
+        normalized_sources = {_to_compact_text(name) for name in source_names if _to_compact_text(name)}
+        flags = {
+            "axiom": "axiom" in normalized_sources,
+            "gmgn": "gmgn" in normalized_sources,
+            "photon": "photon" in normalized_sources,
+        }
+
+    confirmed = [name.upper() for name, enabled in flags.items() if enabled]
+    count = len(confirmed)
+    score_by_count = FALCON_SCORING_CONFIG["confirmation"]["score_by_count"]
+    confirmation_score = score_by_count.get(count, score_by_count[max(score_by_count.keys())])
+
+    return {
+        "source_confirmations": flags,
+        "source_confirmation_count": count,
+        "source_confirmation_names": confirmed,
+        "source_confirmation_score": confirmation_score,
+    }
+
+
+def _extract_holder_concentration_pct(pair):
+    """Best-effort extraction of top-holder concentration (0-100)."""
+    if not isinstance(pair, dict):
+        return None
+
+    candidates = [
+        pair.get("holderConcentrationPct"),
+        pair.get("topHoldersPct"),
+        (pair.get("info") or {}).get("holderConcentrationPct") if isinstance(pair.get("info"), dict) else None,
+        (pair.get("info") or {}).get("topHoldersPct") if isinstance(pair.get("info"), dict) else None,
+        (pair.get("tokenomics") or {}).get("top10Pct") if isinstance(pair.get("tokenomics"), dict) else None,
+    ]
+
+    for value in candidates:
+        if value in (None, ""):
+            continue
+        try:
+            pct = float(value)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= pct <= 1:
+            pct *= 100
+        if 0 <= pct <= 100:
+            return pct
+    return None
+
+
+def _sniper_like_flow(pair, candidate):
+    """Heuristic suspicious flow detector using available tx and optional source metadata."""
+    txns_5m = (pair.get("txns", {}) or {}).get("m5", {}) if isinstance(pair, dict) else {}
+    buys_5m = int(txns_5m.get("buys", 0) or 0)
+    sells_5m = int(txns_5m.get("sells", 0) or 0)
+    volume_5m = safe_number((pair.get("volume", {}) or {}).get("m5", 0) if isinstance(pair, dict) else 0)
+
+    raw_data = (candidate or {}).get("raw_data") or {}
+    suspicious_raw = [
+        raw_data.get("sniper_count"),
+        raw_data.get("bot_count"),
+        raw_data.get("suspicious_bots"),
+        raw_data.get("bundle_count"),
+    ]
+    for value in suspicious_raw:
+        try:
+            if int(value or 0) >= 5:
+                return True
+        except (TypeError, ValueError):
+            continue
+
+    avg_tx = (volume_5m / (buys_5m + sells_5m)) if (buys_5m + sells_5m) > 0 else 0
+    return buys_5m >= 18 and sells_5m <= 2 and avg_tx >= 2500
+
+
+def compute_acceleration_metrics(pair, previous_token):
+    txns_5m = (pair.get("txns", {}) or {}).get("m5", {})
+    buys_5m = int(txns_5m.get("buys", 0) or 0)
+    sells_5m = int(txns_5m.get("sells", 0) or 0)
+    volume_5m = safe_number((pair.get("volume", {}) or {}).get("m5"))
+    price_5m = safe_number((pair.get("priceChange", {}) or {}).get("m5"))
+
+    prev_volume_5m = safe_number((previous_token or {}).get("volume_5m_usd"))
+    prev_price_5m = safe_number((previous_token or {}).get("price_change_5m_pct"))
+
+    volume_growth_ratio = (volume_5m / prev_volume_5m) if prev_volume_5m > 0 else (2.0 if volume_5m >= 5_000 else 1.0)
+    price_delta = price_5m - prev_price_5m
+    buy_sell_ratio = float(buys_5m) if sells_5m <= 0 else float(buys_5m) / float(sells_5m)
+
+    weights = FALCON_SCORING_CONFIG["acceleration"]
+    acceleration_score = 0
+    reasons = []
+
+    if volume_growth_ratio >= 2.5:
+        acceleration_score += weights["volume_growth_2_5x"]
+        reasons.append("volume acceleration >=2.5x scan-over-scan")
+    elif volume_growth_ratio >= 1.8:
+        acceleration_score += weights["volume_growth_1_8x"]
+        reasons.append("volume acceleration >=1.8x scan-over-scan")
+    elif volume_growth_ratio >= 1.2:
+        acceleration_score += weights["volume_growth_1_2x"]
+        reasons.append("volume acceleration >=1.2x scan-over-scan")
+
+    if buy_sell_ratio >= 2.2 and buys_5m >= 14:
+        acceleration_score += weights["buy_pressure_extreme"]
+        reasons.append("extreme buy pressure")
+    elif buy_sell_ratio >= 1.5 and buys_5m >= 10:
+        acceleration_score += weights["buy_pressure_strong"]
+        reasons.append("strong buy pressure")
+    elif buy_sell_ratio >= 1.1 and buys_5m >= 6:
+        acceleration_score += weights["buy_pressure_light"]
+        reasons.append("net positive buy pressure")
+
+    if price_5m >= 3 and price_delta > 0:
+        acceleration_score += weights["price_strong"]
+        reasons.append("price momentum confirms acceleration")
+    elif price_5m > 0 and price_delta > 0:
+        acceleration_score += weights["price_positive"]
+        reasons.append("price trend is improving")
+
+    return {
+        "acceleration_score": acceleration_score,
+        "volume_growth_ratio": round(volume_growth_ratio, 3),
+        "price_delta_5m_pct": round(price_delta, 3),
+        "buy_sell_ratio_5m": round(buy_sell_ratio, 3),
+        "acceleration_reasons": reasons,
+    }
+
+
+def compose_falcon_score(
+    *,
+    base_market_score,
+    intelligence_score,
+    liquidity_usd,
+    risk_label,
+    pair,
+    candidate,
+    pair_age_minutes,
+    social_heat_label,
+    source_confirmation,
+    acceleration,
+):
+    """Combine independent score families into final 0-100 Falcon score."""
+    weights = FALCON_SCORING_CONFIG["weights"]
+    penalties_cfg = FALCON_SCORING_CONFIG["safety_penalties"]
+
+    score = (
+        (base_market_score * weights["market_baseline"])
+        + (intelligence_score * weights["intelligence"])
+        + source_confirmation["source_confirmation_score"]
+        + acceleration["acceleration_score"]
+    )
+
+    reasons = [
+        f"market baseline contribution: {base_market_score} x {weights['market_baseline']}",
+        f"intelligence contribution: {intelligence_score} x {weights['intelligence']}",
+        f"source confirmation bonus: +{source_confirmation['source_confirmation_score']}",
+    ] + acceleration["acceleration_reasons"]
+
+    social_cfg = FALCON_SCORING_CONFIG["social"]
+    if source_confirmation["source_confirmation_count"] >= 2 and acceleration["acceleration_score"] >= 14:
+        if social_heat_label == "VIRAL":
+            score += social_cfg["viral_with_market_confirmation"]
+            reasons.append("viral social catalyst confirmed by market acceleration")
+        elif social_heat_label == "HOT":
+            score += social_cfg["hot_with_market_confirmation"]
+            reasons.append("hot social catalyst confirmed by market acceleration")
+
+    early_cfg = FALCON_SCORING_CONFIG["early_opportunity"]
+    safety_ok = risk_label in ("LOW", "MEDIUM") and liquidity_usd >= 15_000
+    if (
+        pair_age_minutes is not None
+        and pair_age_minutes <= early_cfg["max_age_minutes"]
+        and acceleration["volume_growth_ratio"] >= early_cfg["required_volume_growth"]
+        and safety_ok
+    ):
+        score += early_cfg["bonus"]
+        reasons.append("early-opportunity bonus: very new token with accelerating real volume")
+
+    penalties = []
+    if liquidity_usd < 12_000:
+        score -= penalties_cfg["low_liquidity"]
+        penalties.append("low liquidity penalty")
+
+    if risk_label == "HIGH":
+        score -= penalties_cfg["high_risk"]
+        penalties.append("high risk penalty")
+
+    concentration_pct = _extract_holder_concentration_pct(pair)
+    if concentration_pct is not None:
+        if concentration_pct >= 85:
+            score -= penalties_cfg["holder_concentration_85"]
+            penalties.append(f"holder concentration penalty ({concentration_pct:.1f}% top holders)")
+        elif concentration_pct >= 70:
+            score -= penalties_cfg["holder_concentration_70"]
+            penalties.append(f"holder concentration warning ({concentration_pct:.1f}% top holders)")
+
+    if _sniper_like_flow(pair, candidate):
+        score -= penalties_cfg["sniper_like"]
+        penalties.append("sniper/bot-like flow penalty")
+
+    market_cap = safe_number(pair.get("marketCap") or pair.get("fdv"))
+    if market_cap > 0 and liquidity_usd > 0:
+        liq_to_mcap = liquidity_usd / market_cap
+        if liq_to_mcap < 0.03 and (pair_age_minutes is not None and pair_age_minutes <= 90):
+            score -= penalties_cfg["rug_like"]
+            penalties.append("rug-like liquidity depth penalty")
+
+    bounded_score = _clamp_int(score, 0, 100)
+
+    return {
+        "score": bounded_score,
+        "score_reasons": reasons,
+        "score_penalties": penalties,
+        "holder_concentration_pct": concentration_pct,
+    }
 
 
 def ensure_memory_dirs():
@@ -704,6 +1007,9 @@ def classify_signal(
     volume_5m,
     buys_5m,
     sells_5m,
+    source_confirmation_count=0,
+    acceleration_score=0,
+    social_heat_label="QUIET",
 ):
     """Classify trade readiness via weighted checklist with minimum hit counts."""
     total_txns_5m = buys_5m + sells_5m
@@ -729,6 +1035,8 @@ def classify_signal(
         ("buys>=sells", buy_pressure, 1),
         ("strong buy pressure", strong_buy_pressure, 1),
         ("txn activity>=10", total_txns_5m >= 10, 1),
+        ("source confirmations>=2", source_confirmation_count >= 2, 2),
+        ("acceleration>=10", acceleration_score >= 10, 2),
     ]
 
     passed_checks = [name for name, ok, _ in checks if ok]
@@ -746,23 +1054,34 @@ def classify_signal(
 
     # BUY requires a strong combination, not necessarily every condition.
     # Thresholds: weighted>=11, at least 6 checks passed, and at least 3 core hits.
-    if weighted_score >= 11 and passed_count >= 6 and core_hits >= 3:
+    signal_cfg = FALCON_SCORING_CONFIG["signal"]
+
+    if (
+        score >= signal_cfg["buy_min"]
+        and
+        weighted_score >= 13
+        and passed_count >= 7
+        and core_hits >= 3
+        and source_confirmation_count >= signal_cfg["min_confirmation_for_buy"]
+    ):
         reasons = [
             "weighted strength is high",
             f"{passed_count} checklist conditions satisfied",
             f"{core_hits}/4 core conditions satisfied",
+            f"{source_confirmation_count} source confirmations",
         ]
         return "BUY", reasons
 
     # WATCH captures near-BUY setups with decent combined strength.
     # Path A: weighted>=7, at least 4 checks, at least 2 core hits, no high-risk bearish state.
     # Path B: weighted>=6 with bullish momentum and risk not high.
-    watch_path_a = weighted_score >= 7 and passed_count >= 4 and core_hits >= 2
-    watch_path_b = weighted_score >= 6 and momentum == "BULLISH" and risk_label != "HIGH"
+    watch_path_a = score >= signal_cfg["watch_min"] and weighted_score >= 8 and passed_count >= 5 and core_hits >= 2
+    watch_path_b = score >= signal_cfg["watch_min"] and weighted_score >= 6 and momentum == "BULLISH" and risk_label != "HIGH"
     if watch_path_a or watch_path_b:
         reasons = [
             "near-BUY weighted checklist",
             f"{passed_count} checklist conditions satisfied",
+            f"source confirmations: {source_confirmation_count}",
             "missing: " + ", ".join(failed_checks[:2]) if failed_checks else "minor gaps only",
         ]
         return "WATCH", reasons
@@ -906,8 +1225,8 @@ def scan_tokens(max_tokens=200, top_n=30):
             if contract_address:
                 base["address"] = contract_address
             previous_token = previous_by_contract.get(contract_address)
-            score, reasons = calculate_score(pair)
-            risk_label = classify_risk(score, pair)
+            base_market_score, base_reasons = calculate_score(pair)
+            risk_label = classify_risk(base_market_score, pair)
             if not contract_address or contract_address in seen_contracts_in_scan:
                 continue
             seen_contracts_in_scan.add(contract_address)
@@ -932,9 +1251,6 @@ def scan_tokens(max_tokens=200, top_n=30):
             )
             combined_wallet_count = recent_wallet_count + estimated_wallet_count
             wallet_bonus, wallet_bonus_reason = get_wallet_cluster_bonus(combined_wallet_count)
-            if wallet_bonus:
-                score = min(100, score + wallet_bonus)
-                reasons.append(wallet_bonus_reason)
 
             append_wallet_event(
                 smart_wallet_tracker,
@@ -942,6 +1258,38 @@ def scan_tokens(max_tokens=200, top_n=30):
                 scanned_at,
                 estimated_wallet_count,
             )
+
+            intelligence = calculate_intelligence_engine(pair, previous_token)
+            social_intelligence = SOCIAL_ENGINE.evaluate(
+                SocialContext(
+                    pair=pair,
+                    previous_token=previous_token,
+                    boost_amount=safe_number((candidate.get("raw_data") or {}).get("boost_amount", 0)),
+                    holder_count=intelligence.get("holder_count"),
+                    scanned_at=scanned_at_dt,
+                )
+            )
+            source_confirmation = derive_source_confirmation(candidate)
+            acceleration = compute_acceleration_metrics(pair, previous_token)
+            score_bundle = compose_falcon_score(
+                base_market_score=base_market_score,
+                intelligence_score=intelligence.get("falcon_intelligence_score", 0),
+                liquidity_usd=liquidity_usd,
+                risk_label=risk_label,
+                pair=pair,
+                candidate=candidate,
+                pair_age_minutes=pair_age_minutes,
+                social_heat_label=str(social_intelligence.get("social_heat_label", "QUIET") or "QUIET"),
+                source_confirmation=source_confirmation,
+                acceleration=acceleration,
+            )
+            score = int(score_bundle["score"])
+            reasons = list(base_reasons) + list(intelligence.get("falcon_intelligence_reasons", [])) + score_bundle["score_reasons"]
+            score_penalties = list(intelligence.get("falcon_intelligence_penalties", [])) + score_bundle["score_penalties"]
+
+            if wallet_bonus and risk_label != "HIGH":
+                score = min(100, score + wallet_bonus)
+                reasons.append(wallet_bonus_reason)
 
             momentum = classify_momentum(price_change_5m_pct, buys_5m, sells_5m)
             confidence = calculate_confidence(
@@ -961,35 +1309,47 @@ def scan_tokens(max_tokens=200, top_n=30):
                 volume_5m=volume_5m_usd,
                 buys_5m=buys_5m,
                 sells_5m=sells_5m,
-            )
-            intelligence = calculate_intelligence_engine(pair, previous_token)
-            social_intelligence = SOCIAL_ENGINE.evaluate(
-                SocialContext(
-                    pair=pair,
-                    previous_token=previous_token,
-                    boost_amount=safe_number((candidate.get("raw_data") or {}).get("boost_amount", 0)),
-                    holder_count=intelligence.get("holder_count"),
-                    scanned_at=scanned_at_dt,
-                )
+                source_confirmation_count=source_confirmation["source_confirmation_count"],
+                acceleration_score=acceleration["acceleration_score"],
+                social_heat_label=str(social_intelligence.get("social_heat_label", "QUIET") or "QUIET"),
             )
 
             smart_wallet_high = combined_wallet_count >= 3
             buy_now_reasons = []
-            if smart_wallet_high and score > 90:
+            signal_cfg = FALCON_SCORING_CONFIG["signal"]
+            if (
+                score >= signal_cfg["buy_now_min"]
+                and risk_label in ("LOW", "MEDIUM")
+                and source_confirmation["source_confirmation_count"] >= signal_cfg["min_confirmation_for_buy_now"]
+                and acceleration["acceleration_score"] >= 14
+                and confidence >= 70
+                and momentum == "BULLISH"
+            ):
                 signal = "BUY NOW"
                 buy_now_reasons = [
-                    "Smart wallet cluster is HIGH (3+ tracked wallets in 10 minutes)",
-                    f"Falcon Score is {score} (>90)",
+                    "unusually strong early momentum and acceleration",
+                    f"{source_confirmation['source_confirmation_count']} independent source confirmations",
+                    f"Falcon Score is {score} (>= {signal_cfg['buy_now_min']})",
                 ]
                 signal_reasons = buy_now_reasons + signal_reasons
 
             high_priority_alert = False
             high_priority_reasons = []
-            if social_intelligence.get("social_heat_label") == "VIRAL" and score > 90:
+            social_heat_label = str(social_intelligence.get("social_heat_label", "QUIET") or "QUIET")
+            if (
+                score >= signal_cfg["high_priority_min"]
+                and social_heat_label in ("HOT", "VIRAL")
+                and source_confirmation["source_confirmation_count"] >= signal_cfg["min_confirmation_for_high_priority"]
+                and acceleration["acceleration_score"] >= 16
+                and smart_wallet_high
+                and risk_label in ("LOW", "MEDIUM")
+            ):
                 high_priority_alert = True
                 high_priority_reasons = [
-                    "Social Heat is VIRAL",
-                    f"Falcon Score is {score} (>90)",
+                    f"Social Heat is {social_heat_label}",
+                    "market acceleration and smart-wallet convergence detected",
+                    f"{source_confirmation['source_confirmation_count']} source confirmations",
+                    f"Falcon Score is {score} (>= {signal_cfg['high_priority_min']})",
                 ]
 
             is_brand_new = contract_address not in seen_contracts
@@ -1010,6 +1370,7 @@ def scan_tokens(max_tokens=200, top_n=30):
                 "momentum": momentum,
                 "confidence": confidence,
                 "reasons": reasons,
+                "score_penalties": score_penalties,
                 "token_name": base.get("name", "Unknown"),
                 "token_symbol": base.get("symbol", "UNKNOWN"),
                 "contract_address": contract_address or "N/A",
@@ -1024,6 +1385,7 @@ def scan_tokens(max_tokens=200, top_n=30):
                 "falcon_intelligence_reasons": intelligence["falcon_intelligence_reasons"],
                 "falcon_intelligence_penalties": intelligence["falcon_intelligence_penalties"],
                 "holder_count": intelligence["holder_count"],
+                "holder_concentration_pct": score_bundle["holder_concentration_pct"],
                 "pair_age_minutes": intelligence["pair_age_minutes"],
                 "smart_wallet_count": combined_wallet_count,
                 "smart_wallet_display": get_smart_wallet_display(combined_wallet_count),
@@ -1034,6 +1396,14 @@ def scan_tokens(max_tokens=200, top_n=30):
                 "social_heat": social_intelligence.get("social_heat_badge", "⚪ QUIET"),
                 "social_heat_reasons": social_intelligence.get("social_heat_reasons", []),
                 "social_provider_scores": social_intelligence.get("social_provider_scores", {}),
+                "source_confirmations": source_confirmation["source_confirmations"],
+                "source_confirmation_count": source_confirmation["source_confirmation_count"],
+                "source_confirmation_names": source_confirmation["source_confirmation_names"],
+                "source_confirmation_score": source_confirmation["source_confirmation_score"],
+                "acceleration_score": acceleration["acceleration_score"],
+                "volume_growth_ratio_5m": acceleration["volume_growth_ratio"],
+                "price_delta_5m_pct": acceleration["price_delta_5m_pct"],
+                "buy_sell_ratio_5m": acceleration["buy_sell_ratio_5m"],
                 "high_priority_alert": high_priority_alert,
                 "high_priority_reasons": high_priority_reasons,
                 "buy_now_reasons": buy_now_reasons,

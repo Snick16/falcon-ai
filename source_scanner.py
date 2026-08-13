@@ -15,6 +15,13 @@ DEX_TOKEN_BATCH_URL = "https://api.dexscreener.com/tokens/v1/solana/{}"
 DEX_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search"
 PUMPFUN_RECENT_COINS_URL = "https://frontend-api-v3.pump.fun/coins"
 X_RECENT_SEARCH_URL = "https://api.twitter.com/2/tweets/search/recent"
+AXIOM_NEW_PAIRS_URL = "https://api.axiom.trade/new-pairs"
+GMGN_SOL_SWAPS_RANK_URL = "https://gmgn.ai/defi/quotation/v1/rank/sol/swaps/24h"
+
+AXIOM_SOURCE_TAG = "axiom"
+GMGN_SOURCE_TAG = "gmgn"
+PHOTON_SOURCE_TAG = "photon"
+NATIVE_CONFIRMATION_SOURCES = (AXIOM_SOURCE_TAG, GMGN_SOURCE_TAG, PHOTON_SOURCE_TAG)
 
 SOLANA_CHAIN_ID = "solana"
 SOLANA_ADDRESS_RE = re.compile(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b")
@@ -376,6 +383,11 @@ def _build_candidate_from_pair(
     raw_data = {
         "pair": pair,
         "found_by": [source],
+        "source_confirmations": {
+            AXIOM_SOURCE_TAG: source == AXIOM_SOURCE_TAG,
+            GMGN_SOURCE_TAG: source == GMGN_SOURCE_TAG,
+            PHOTON_SOURCE_TAG: source == PHOTON_SOURCE_TAG,
+        },
     }
     if extra_raw:
         raw_data.update(extra_raw)
@@ -402,6 +414,500 @@ def _build_candidate_from_pair(
         social_mentions=max(0, _safe_int(social_mentions)),
         raw_data=raw_data,
     )
+
+
+def _extract_solana_addresses(value) -> List[str]:
+    """Extract unique Solana-like addresses from nested payload values."""
+    addresses: List[str] = []
+    seen = set()
+
+    def _walk(item):
+        if isinstance(item, dict):
+            for nested in item.values():
+                _walk(nested)
+            return
+
+        if isinstance(item, list):
+            for nested in item:
+                _walk(nested)
+            return
+
+        if item is None:
+            return
+
+        text = str(item)
+        for match in SOLANA_ADDRESS_RE.findall(text):
+            normalized = _normalize_address(match)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                addresses.append(normalized)
+
+    _walk(value)
+    return addresses
+
+
+def _iter_payload_items(payload) -> List[dict]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+
+    # Some sources return nested payloads (for example: {"data": {"rank": [...]}}).
+    data_payload = payload.get("data")
+    if isinstance(data_payload, dict):
+        for nested_key in ("rank", "list", "items", "tokens", "results", "pairs"):
+            nested_value = data_payload.get(nested_key)
+            if isinstance(nested_value, list):
+                return [item for item in nested_value if isinstance(item, dict)]
+
+    for key in ("data", "items", "tokens", "results", "pairs"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return [payload]
+
+
+def _normalize_native_source_candidates(
+    source_tag: str,
+    api_url: str,
+    payload,
+    *,
+    limit: int,
+    discovered_at: str,
+) -> Tuple[List[TokenCandidate], Dict[str, object]]:
+    """Normalize arbitrary native-source payload rows into Falcon token candidates."""
+    items = _iter_payload_items(payload)
+    rows_by_address: Dict[str, dict] = {}
+
+    for item in items:
+        addresses = _extract_solana_addresses(item)
+        for token_address in addresses:
+            if token_address not in rows_by_address:
+                rows_by_address[token_address] = item
+            if len(rows_by_address) >= max(1, int(limit or 1)):
+                break
+        if len(rows_by_address) >= max(1, int(limit or 1)):
+            break
+
+    addresses = list(rows_by_address.keys())
+    pairs_by_token = _fetch_pairs_for_token_addresses(addresses) if addresses else {}
+    candidates: List[TokenCandidate] = []
+
+    for token_address in addresses:
+        row = rows_by_address.get(token_address, {})
+        pair = _best_pair(pairs_by_token.get(token_address, []))
+        item_url = str((row or {}).get("url", "") or "")
+        resolved_source_url = item_url or api_url
+
+        if pair:
+            candidate = _build_candidate_from_pair(
+                pair,
+                source=source_tag,
+                source_url=resolved_source_url,
+                discovered_at=discovered_at,
+                extra_raw={
+                    "source_confirmations": {
+                        AXIOM_SOURCE_TAG: source_tag == AXIOM_SOURCE_TAG,
+                        GMGN_SOURCE_TAG: source_tag == GMGN_SOURCE_TAG,
+                        PHOTON_SOURCE_TAG: source_tag == PHOTON_SOURCE_TAG,
+                    },
+                    f"{source_tag}_raw": row,
+                },
+            )
+            if candidate:
+                fallback_symbol = str((row or {}).get("symbol", "") or "").strip()
+                fallback_name = str((row or {}).get("name", "") or "").strip()
+                if fallback_symbol and candidate.symbol in ("", "UNKNOWN"):
+                    candidate.symbol = fallback_symbol
+                if fallback_name and candidate.name in ("", "Unknown"):
+                    candidate.name = fallback_name
+                candidates.append(candidate)
+            continue
+
+        symbol = str((row or {}).get("symbol", "UNKNOWN") or "UNKNOWN")
+        name = str((row or {}).get("name", "Unknown") or "Unknown")
+        candidates.append(
+            TokenCandidate(
+                chain=SOLANA_CHAIN_ID,
+                token_address=token_address,
+                symbol=symbol,
+                name=name,
+                source=source_tag,
+                source_url=resolved_source_url,
+                pair_address="",
+                discovered_at=discovered_at,
+                market_cap=0.0,
+                liquidity=0.0,
+                volume_5m=0.0,
+                volume_1h=0.0,
+                volume_24h=0.0,
+                price_change_5m=0.0,
+                price_change_1h=0.0,
+                buys_5m=0,
+                sells_5m=0,
+                token_age_minutes=0.0,
+                social_mentions=0,
+                raw_data={
+                    "pair": {},
+                    "found_by": [source_tag],
+                    "source_confirmations": {
+                        AXIOM_SOURCE_TAG: source_tag == AXIOM_SOURCE_TAG,
+                        GMGN_SOURCE_TAG: source_tag == GMGN_SOURCE_TAG,
+                        PHOTON_SOURCE_TAG: source_tag == PHOTON_SOURCE_TAG,
+                    },
+                    f"{source_tag}_raw": row,
+                },
+            )
+        )
+
+    details = {
+        "payload_items": len(items),
+        "addresses_detected": len(addresses),
+        "candidates_returned": len(candidates),
+    }
+    return candidates, details
+
+
+def _scan_native_source(
+    *,
+    source_tag: str,
+    limit: int,
+    enabled_env: str,
+    api_url_env: str,
+    api_key_env: str,
+    required_access_note: str,
+) -> Tuple[List[TokenCandidate], Dict[str, object]]:
+    started = time.perf_counter()
+    enabled = _bool_env(enabled_env, False)
+    api_url = os.getenv(api_url_env, "").strip()
+    api_key = os.getenv(api_key_env, "").strip()
+
+    details: Dict[str, object] = {
+        "configured": True,
+        "source_url": api_url,
+        "required_access": required_access_note,
+        "candidates_returned": 0,
+        "elapsed_ms": 0,
+        "error_message": "",
+    }
+
+    if not enabled:
+        details["configured"] = False
+        details["error_message"] = (
+            f"{source_tag.upper()} collector unavailable: set {enabled_env}=true and provide {api_url_env}."
+        )
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    missing = []
+    if not api_url:
+        missing.append(api_url_env)
+    if not api_key:
+        missing.append(api_key_env)
+    if missing:
+        details["configured"] = False
+        details["error_message"] = (
+            f"{source_tag.upper()} collector unavailable: missing " + ", ".join(missing)
+        )
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        payload = _request_json(api_url, headers=headers, timeout=12, retries=1)
+    except Exception:
+        details["error_message"] = f"{source_tag.upper()} endpoint unavailable or rejected credentials."
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    candidates, parse_details = _normalize_native_source_candidates(
+        source_tag=source_tag,
+        api_url=api_url,
+        payload=payload,
+        limit=limit,
+        discovered_at=_utc_now_iso(),
+    )
+    details.update(parse_details)
+    details["candidates_returned"] = len(candidates)
+    details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+    return candidates, details
+
+
+def scan_axiom_source(limit: int = 40) -> Tuple[List[TokenCandidate], Dict[str, object]]:
+    """Scan Axiom feed using an authenticated API contract."""
+    started = time.perf_counter()
+    enabled = _bool_env("AXIOM_ENABLED", False)
+    api_url = os.getenv("AXIOM_API_URL", "").strip() or AXIOM_NEW_PAIRS_URL
+    axiom_cookie = os.getenv("AXIOM_COOKIE", "").strip()
+    user_agent = os.getenv(
+        "AXIOM_USER_AGENT",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    ).strip()
+
+    details: Dict[str, object] = {
+        "configured": True,
+        "source_url": api_url,
+        "required_access": (
+            "Axiom API requires authenticated browser-session cookies. Provide AXIOM_COOKIE with valid session "
+            "cookies from an active Axiom login and matching AXIOM_USER_AGENT."
+        ),
+        "candidates_returned": 0,
+        "elapsed_ms": 0,
+        "error_message": "",
+    }
+
+    if not enabled:
+        details["configured"] = False
+        details["error_message"] = "AXIOM collector unavailable: set AXIOM_ENABLED=true."
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    if not api_url:
+        details["configured"] = False
+        details["error_message"] = "AXIOM collector unavailable: missing AXIOM_API_URL."
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    if not axiom_cookie:
+        details["configured"] = False
+        details["error_message"] = (
+            "AXIOM collector unavailable: missing AXIOM_COOKIE. "
+            "Set AXIOM_COOKIE to valid session cookies from a logged-in Axiom browser session."
+        )
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://axiom.trade/",
+        "Origin": "https://axiom.trade",
+        "Cookie": axiom_cookie,
+    }
+    params = {
+        "limit": max(1, int(limit or 1)),
+    }
+
+    try:
+        payload = _request_json(api_url, params=params, headers=headers, timeout=12, retries=1)
+    except Exception as error:  # noqa: BLE001 - source-level safe status reporting.
+        message = str(error)
+        if "Session invalid" in message or "No auth cookies" in message:
+            details["error_message"] = (
+                "AXIOM session invalid. Refresh AXIOM_COOKIE from a valid logged-in browser session "
+                "and ensure AXIOM_USER_AGENT matches that session."
+            )
+        elif "403" in message or "Cloudflare" in message:
+            details["error_message"] = (
+                "AXIOM endpoint blocked by anti-bot challenge. Refresh AXIOM_COOKIE and AXIOM_USER_AGENT "
+                "from a valid browser session."
+            )
+        elif "404" in message:
+            details["error_message"] = (
+                "AXIOM endpoint contract unavailable from this environment (404). Confirm AXIOM_API_URL and "
+                "authenticated AXIOM_COOKIE access."
+            )
+        else:
+            details["error_message"] = (
+                "AXIOM endpoint unavailable or blocked. Provide valid AXIOM_COOKIE and AXIOM_USER_AGENT."
+            )
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    candidates, parse_details = _normalize_native_source_candidates(
+        source_tag=AXIOM_SOURCE_TAG,
+        api_url=api_url,
+        payload=payload,
+        limit=limit,
+        discovered_at=_utc_now_iso(),
+    )
+    details.update(parse_details)
+    details["candidates_returned"] = len(candidates)
+    details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+    return candidates, details
+
+
+def scan_gmgn_source(limit: int = 40) -> Tuple[List[TokenCandidate], Dict[str, object]]:
+    """Scan GMGN Solana rank feed using an explicit endpoint and access contract."""
+    started = time.perf_counter()
+    enabled = _bool_env("GMGN_ENABLED", False)
+    api_url = os.getenv("GMGN_API_URL", "").strip() or GMGN_SOL_SWAPS_RANK_URL
+    gmgn_cookie = os.getenv("GMGN_COOKIE", "").strip()
+    user_agent = os.getenv(
+        "GMGN_USER_AGENT",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    ).strip()
+
+    details: Dict[str, object] = {
+        "configured": True,
+        "source_url": api_url,
+        "required_access": (
+            "GMGN Solana rank endpoint is Cloudflare-gated. Provide GMGN_COOKIE with a valid "
+            "browser-session clearance value (must include cf_clearance=...) and matching GMGN_USER_AGENT."
+        ),
+        "candidates_returned": 0,
+        "elapsed_ms": 0,
+        "error_message": "",
+    }
+
+    if not enabled:
+        details["configured"] = False
+        details["error_message"] = "GMGN collector unavailable: set GMGN_ENABLED=true."
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    if not gmgn_cookie:
+        details["configured"] = False
+        details["error_message"] = (
+            "GMGN collector unavailable: missing GMGN_COOKIE. "
+            "Set GMGN_COOKIE to include cf_clearance=... from an authenticated GMGN browser session."
+        )
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://gmgn.ai/",
+        "Origin": "https://gmgn.ai",
+        "Cookie": gmgn_cookie,
+    }
+    params = {
+        "limit": max(1, int(limit or 1)),
+        "orderby": os.getenv("GMGN_ORDERBY", "swaps").strip() or "swaps",
+        "direction": os.getenv("GMGN_DIRECTION", "desc").strip() or "desc",
+    }
+
+    try:
+        payload = _request_json(api_url, params=params, headers=headers, timeout=12, retries=1)
+    except Exception as error:  # noqa: BLE001 - surface safe source-level status.
+        message = str(error)
+        if "403" in message or "Cloudflare" in message:
+            details["error_message"] = (
+                "GMGN endpoint blocked by Cloudflare challenge. "
+                "Refresh GMGN_COOKIE (cf_clearance) and GMGN_USER_AGENT from a valid browser session."
+            )
+        elif "404" in message:
+            details["error_message"] = (
+                "GMGN endpoint contract unavailable from this environment (404). "
+                "Confirm GMGN_API_URL access and provide a valid GMGN_COOKIE (cf_clearance) with GMGN_USER_AGENT."
+            )
+        else:
+            details["error_message"] = (
+                "GMGN endpoint unavailable or blocked. "
+                "Provide valid GMGN_COOKIE (cf_clearance) and matching GMGN_USER_AGENT."
+            )
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    candidates, parse_details = _normalize_native_source_candidates(
+        source_tag=GMGN_SOURCE_TAG,
+        api_url=api_url,
+        payload=payload,
+        limit=limit,
+        discovered_at=_utc_now_iso(),
+    )
+    details.update(parse_details)
+    details["candidates_returned"] = len(candidates)
+    details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+    return candidates, details
+
+
+def scan_photon_source(limit: int = 40) -> Tuple[List[TokenCandidate], Dict[str, object]]:
+    """Scan Photon feed using an authenticated API contract."""
+    started = time.perf_counter()
+    enabled = _bool_env("PHOTON_ENABLED", False)
+    api_url = os.getenv("PHOTON_API_URL", "").strip()
+    photon_cookie = os.getenv("PHOTON_COOKIE", "").strip()
+    user_agent = os.getenv(
+        "PHOTON_USER_AGENT",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    ).strip()
+
+    details: Dict[str, object] = {
+        "configured": True,
+        "source_url": api_url,
+        "required_access": (
+            "Photon token feed is not publicly documented and is Cloudflare/session-gated. Provide PHOTON_API_URL "
+            "for your provisioned feed endpoint plus PHOTON_COOKIE with valid browser-session cookies "
+            "(including cf_clearance if challenged) and matching PHOTON_USER_AGENT."
+        ),
+        "candidates_returned": 0,
+        "elapsed_ms": 0,
+        "error_message": "",
+    }
+
+    if not enabled:
+        details["configured"] = False
+        details["error_message"] = "PHOTON collector unavailable: set PHOTON_ENABLED=true."
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    missing = []
+    if not api_url:
+        missing.append("PHOTON_API_URL")
+    if not photon_cookie:
+        missing.append("PHOTON_COOKIE")
+    if missing:
+        details["configured"] = False
+        details["error_message"] = (
+            "PHOTON collector unavailable: missing " + ", ".join(missing) + "."
+        )
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://photon-sol.tinyastro.io/",
+        "Origin": "https://photon-sol.tinyastro.io",
+        "Cookie": photon_cookie,
+    }
+    params = {
+        "limit": max(1, int(limit or 1)),
+    }
+
+    try:
+        payload = _request_json(api_url, params=params, headers=headers, timeout=12, retries=1)
+    except Exception as error:  # noqa: BLE001 - source-level safe status reporting.
+        message = str(error)
+        if "403" in message or "Cloudflare" in message:
+            details["error_message"] = (
+                "PHOTON endpoint blocked by anti-bot challenge. Refresh PHOTON_COOKIE and PHOTON_USER_AGENT "
+                "from a valid browser session."
+            )
+        elif "Session invalid" in message or "No auth cookies" in message:
+            details["error_message"] = (
+                "PHOTON session invalid. Refresh PHOTON_COOKIE from a valid logged-in browser session and ensure "
+                "PHOTON_USER_AGENT matches that session."
+            )
+        elif "404" in message:
+            details["error_message"] = (
+                "PHOTON endpoint contract unavailable from this environment (404). Confirm PHOTON_API_URL and "
+                "authenticated PHOTON_COOKIE access."
+            )
+        else:
+            details["error_message"] = (
+                "PHOTON endpoint unavailable or blocked. Provide valid PHOTON_API_URL, PHOTON_COOKIE, and "
+                "PHOTON_USER_AGENT."
+            )
+        details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        return [], details
+
+    candidates, parse_details = _normalize_native_source_candidates(
+        source_tag=PHOTON_SOURCE_TAG,
+        api_url=api_url,
+        payload=payload,
+        limit=limit,
+        discovered_at=_utc_now_iso(),
+    )
+    details.update(parse_details)
+    details["candidates_returned"] = len(candidates)
+    details["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+    return candidates, details
 
 
 def _fetch_pairs_for_token_addresses(token_addresses: Sequence[str], timeout: int = 20) -> Dict[str, List[dict]]:
@@ -1310,6 +1816,15 @@ def _dedupe_candidates(candidates: Sequence[TokenCandidate]) -> List[TokenCandid
         merged_sources = sorted({str(item) for item in existing_sources + candidate_sources if item})
         existing.raw_data["found_by"] = merged_sources
 
+        existing_confirmations = existing.raw_data.get("source_confirmations", {})
+        candidate_confirmations = candidate.raw_data.get("source_confirmations", {})
+        merged_confirmations = {
+            source: bool((existing_confirmations or {}).get(source, False))
+            or bool((candidate_confirmations or {}).get(source, False))
+            for source in NATIVE_CONFIRMATION_SOURCES
+        }
+        existing.raw_data["source_confirmations"] = merged_confirmations
+
         existing_messages = existing.raw_data.get("telegram_messages", [])
         candidate_messages = candidate.raw_data.get("telegram_messages", [])
         if isinstance(existing_messages, list) and isinstance(candidate_messages, list):
@@ -1346,6 +1861,7 @@ def _dedupe_candidates(candidates: Sequence[TokenCandidate]) -> List[TokenCandid
         if candidate.liquidity > existing.liquidity:
             merged_candidate = candidate
             merged_candidate.raw_data["found_by"] = merged_sources
+            merged_candidate.raw_data["source_confirmations"] = merged_confirmations
             merged_candidate.raw_data["telegram_messages"] = existing.raw_data.get("telegram_messages", [])
             merged_candidate.raw_data["telegram_channels"] = existing.raw_data.get("telegram_channels", [])
             merged_candidate.social_mentions = max(merged_candidate.social_mentions, existing.social_mentions)
@@ -1360,6 +1876,27 @@ def collect_all_candidates(max_candidates: int = 200) -> Dict[str, object]:
     scanner_status: List[ScannerSourceStatus] = []
 
     source_jobs = [
+        {
+            "source_name": "axiom",
+            "configured": True,
+            "scanner_fn": scan_axiom_source,
+            "scanner_kwargs": {"limit": max(20, max_candidates // 4)},
+            "not_configured_message": "Axiom collector unavailable.",
+        },
+        {
+            "source_name": "gmgn",
+            "configured": True,
+            "scanner_fn": scan_gmgn_source,
+            "scanner_kwargs": {"limit": max(20, max_candidates // 4)},
+            "not_configured_message": "GMGN collector unavailable.",
+        },
+        {
+            "source_name": "photon",
+            "configured": True,
+            "scanner_fn": scan_photon_source,
+            "scanner_kwargs": {"limit": max(20, max_candidates // 4)},
+            "not_configured_message": "Photon collector unavailable.",
+        },
         {
             "source_name": "dexscreener_latest",
             "configured": True,
