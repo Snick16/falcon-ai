@@ -1087,8 +1087,14 @@ def nav_chip(label, href=None, active=False, dim=False):
 
 def render_falcon_masthead(high_priority_active=False):
     state_class = falcon_eye_state_class(high_priority_active)
-    eyes_asset = "assets/icons/falcon_eyes.png"
-    eyes_asset_path = Path(__file__).resolve().parent / eyes_asset
+    icons_dir = Path(__file__).resolve().parent / "assets" / "icons"
+    eyes_asset_path = icons_dir / "Falcon_eyes.png"
+    if not eyes_asset_path.exists() and icons_dir.exists():
+        # Render runs on Linux (case-sensitive); resolve the expected icon by name, ignoring case.
+        for candidate in icons_dir.iterdir():
+            if candidate.is_file() and candidate.name.lower() == "falcon_eyes.png":
+                eyes_asset_path = candidate
+                break
     eyes_data_uri = ""
     if eyes_asset_path.exists():
         try:
@@ -1546,8 +1552,6 @@ def display_falcon():
     else:
         high_priority_active = False
 
-    st.markdown('<div class="fal-shell">', unsafe_allow_html=True)
-
     render_falcon_masthead(high_priority_active=high_priority_active)
 
     top_row_cols = st.columns([4, 2])
@@ -1573,17 +1577,13 @@ def display_falcon():
 
     bottom_row_cols = st.columns([4, 2])
     with bottom_row_cols[0]:
-        st.markdown('<div class="control-strip">', unsafe_allow_html=True)
         left_controls = st.columns([1.35, 1])
         with left_controls[0]:
             refresh_clicked = st.button("Refresh Scan", type="primary", use_container_width=True, key="falcon_refresh_scan")
         with left_controls[1]:
             live_mode = st.toggle("Live 2.5s", value=True, key="falcon_live_mode")
-        st.markdown('</div>', unsafe_allow_html=True)
     with bottom_row_cols[1]:
-        st.markdown('<div class="control-strip">', unsafe_allow_html=True)
         test_telegram_clicked = st.button("TEST TELEGRAM ALERT", use_container_width=True, key="falcon_test_telegram_alert")
-        st.markdown('</div>', unsafe_allow_html=True)
     if test_telegram_clicked:
         sent_ok, sent_message = send_dashboard_test_telegram_alert()
         if sent_ok:
@@ -1608,7 +1608,6 @@ def display_falcon():
         st.stop()
 
     scan_time = format_scan_time(payload.get("scanned_at"))
-    st.markdown('<div class="fal-filter-shell">', unsafe_allow_html=True)
     filter_cols = st.columns([2.1, 2.1, 1.2, 1.3])
     with filter_cols[0]:
         signal_filter = st.selectbox("Signal", ["ALL", "BUY NOW", "BUY", "WATCH", "PASS"], index=0, key="falcon_signal_filter")
@@ -1624,7 +1623,6 @@ def display_falcon():
         st.markdown('<div class="fal-filter-status">' + nav_chip(f"Market Temp {temperature}", active=True) + '</div>', unsafe_allow_html=True)
     with filter_cols[3]:
         st.markdown('<div class="fal-filter-status">' + nav_chip(f"Last Scan {scan_time}", dim=True) + '</div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
 
     filtered_tokens = tokens
     if signal_filter != "ALL":
@@ -1637,7 +1635,6 @@ def display_falcon():
     filtered_tokens = sorted(filtered_tokens, key=lambda t: to_int(t.get("score", 0)), reverse=True)
     if not filtered_tokens:
         st.info("No opportunities match current filters.")
-        st.markdown('</div>', unsafe_allow_html=True)
         st.stop()
 
     strongest = strongest_signal(filtered_tokens)
@@ -1678,8 +1675,6 @@ def display_falcon():
 
     render_desktop_table(filtered_tokens)
     render_mobile_cards(filtered_tokens)
-
-    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def live_falcon():
