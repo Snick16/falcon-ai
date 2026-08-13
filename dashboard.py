@@ -150,7 +150,7 @@ def inject_css():
             width: 100%;
             overflow: hidden;
             background: #000000;
-            min-height: 172px;
+            min-height: 192px;
         }
 
         .fal-header-image-wrap {
@@ -1153,13 +1153,8 @@ def nav_chip(label, href=None, active=False, dim=False):
 def render_falcon_masthead(high_priority_active=False):
     state_class = falcon_eye_state_class(high_priority_active)
     icons_dir = Path(__file__).resolve().parent / "assets" / "icons"
-    eyes_asset_path = icons_dir / "Falcon_eyes.png"
-    if not eyes_asset_path.exists() and icons_dir.exists():
-        # Render runs on Linux (case-sensitive); resolve the expected icon by name, ignoring case.
-        for candidate in icons_dir.iterdir():
-            if candidate.is_file() and candidate.name.lower() == "falcon_eyes.png":
-                eyes_asset_path = candidate
-                break
+    eyes_asset_path = icons_dir / "New Header.png"
+    print(f"[falcon_masthead] resolved image path: {eyes_asset_path.resolve()} (exists={eyes_asset_path.exists()})")
     eyes_data_uri = ""
     if eyes_asset_path.exists():
         try:
