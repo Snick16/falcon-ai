@@ -96,7 +96,7 @@ def inject_css():
             --bad: #ff5d5d;
             --eye: #ff5e1a;
             --eye-bright: #ff6f2d;
-            --safe-top: 14px;
+            --safe-top: 0rem;
         }
 
         .stApp {
@@ -104,6 +104,23 @@ def inject_css():
             color: var(--text);
             font-size: 14px;
             font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+        }
+
+        [data-testid="stHeader"],
+        [data-testid="stToolbar"],
+        [data-testid="stDecoration"],
+        [data-testid="stStatusWidget"],
+        #MainMenu,
+        header {
+            display: none !important;
+            visibility: hidden !important;
+            height: 0 !important;
+            min-height: 0 !important;
+        }
+
+        [data-testid="stAppViewContainer"] > .main {
+            padding-top: 0 !important;
+            margin-top: 0 !important;
         }
 
         .block-container {
@@ -283,6 +300,17 @@ def inject_css():
             margin-top: 1px;
         }
 
+        .fal-toolbar-gap {
+            height: 8px;
+        }
+
+        .fal-toolbar-center {
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
         .fal-filter-status {
             height: 100%;
             border: 1px solid var(--border-soft);
@@ -290,16 +318,53 @@ def inject_css():
             background: #000000;
             display: flex;
             align-items: center;
-            justify-content: center;
-            min-height: 44px;
-            padding: 4px 6px;
+            justify-content: flex-start;
+            min-height: 58px;
+            padding: 6px 10px;
         }
 
-        .fal-filter-status .status-chip {
+        .fal-filter-status-offset {
+            margin-top: 8px;
+        }
+
+        .fal-filter-status-card {
             width: 100%;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .fal-filter-status-icon {
+            flex: 0 0 auto;
+            font-size: 0.88rem;
+            color: #a7ffca;
+            line-height: 1;
+        }
+
+        .fal-filter-status-copy {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
             justify-content: center;
-            font-size: 0.61rem;
-            padding: 3px 6px;
+            gap: 1px;
+        }
+
+        .fal-filter-status-title {
+            font-size: 0.63rem;
+            letter-spacing: 0.09em;
+            text-transform: uppercase;
+            color: #a7ffca;
+            line-height: 1.1;
+        }
+
+        .fal-filter-status-value {
+            font-size: 0.72rem;
+            color: #dcffe8;
+            font-family: 'IBM Plex Mono', monospace;
+            line-height: 1.2;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
         div[data-testid="stSelectbox"] label p {
@@ -1554,6 +1619,8 @@ def display_falcon():
 
     render_falcon_masthead(high_priority_active=high_priority_active)
 
+    st.markdown('<div class="fal-toolbar-gap"></div>', unsafe_allow_html=True)
+
     top_row_cols = st.columns([4, 2])
     with top_row_cols[0]:
         st.markdown(
@@ -1564,18 +1631,10 @@ def display_falcon():
             + '</div>',
             unsafe_allow_html=True,
         )
-    with top_row_cols[1]:
-        st.markdown(
-            '<div class="fal-status-right">'
-            + f'<a class="icon-chip" href="{html.escape(platform_links["x"] or "#")}" target="_blank" rel="noopener noreferrer" title="X">𝕏</a>'
-            + f'<a class="icon-chip" href="{html.escape(platform_links["telegram"] or "#")}" target="_blank" rel="noopener noreferrer" title="Telegram">✈</a>'
-            + f'<a class="icon-chip" href="{html.escape(platform_links["discord"] or "#")}" target="_blank" rel="noopener noreferrer" title="Discord">◎</a>'
-            + '<span class="icon-chip" title="Settings">⚙</span>'
-            + '</div>',
-            unsafe_allow_html=True,
-        )
 
-    bottom_row_cols = st.columns([4, 2])
+    st.markdown('<div class="fal-toolbar-gap"></div>', unsafe_allow_html=True)
+
+    bottom_row_cols = st.columns([4, 2, 2])
     with bottom_row_cols[0]:
         left_controls = st.columns([1.35, 1])
         with left_controls[0]:
@@ -1583,6 +1642,16 @@ def display_falcon():
         with left_controls[1]:
             live_mode = st.toggle("Live 2.5s", value=True, key="falcon_live_mode")
     with bottom_row_cols[1]:
+        st.markdown(
+            '<div class="fal-toolbar-center"><div class="fal-status-right">'
+            + f'<a class="icon-chip" href="{html.escape(platform_links["x"] or "#")}" target="_blank" rel="noopener noreferrer" title="X">𝕏</a>'
+            + f'<a class="icon-chip" href="{html.escape(platform_links["telegram"] or "#")}" target="_blank" rel="noopener noreferrer" title="Telegram">✈</a>'
+            + f'<a class="icon-chip" href="{html.escape(platform_links["discord"] or "#")}" target="_blank" rel="noopener noreferrer" title="Discord">◎</a>'
+            + '<span class="icon-chip" title="Settings">⚙</span>'
+            + '</div></div>',
+            unsafe_allow_html=True,
+        )
+    with bottom_row_cols[2]:
         test_telegram_clicked = st.button("TEST TELEGRAM ALERT", use_container_width=True, key="falcon_test_telegram_alert")
     if test_telegram_clicked:
         sent_ok, sent_message = send_dashboard_test_telegram_alert()
@@ -1608,7 +1677,7 @@ def display_falcon():
         st.stop()
 
     scan_time = format_scan_time(payload.get("scanned_at"))
-    filter_cols = st.columns([2.1, 2.1, 1.2, 1.3])
+    filter_cols = st.columns([1, 1, 1, 1])
     with filter_cols[0]:
         signal_filter = st.selectbox("Signal", ["ALL", "BUY NOW", "BUY", "WATCH", "PASS"], index=0, key="falcon_signal_filter")
     with filter_cols[1]:
@@ -1620,9 +1689,25 @@ def display_falcon():
         if conviction_filter != "ALL":
             filtered_for_temp = [t for t in filtered_for_temp if str(t.get("conviction_rating", "WATCH")).upper() == conviction_filter]
         temperature = market_temperature(filtered_for_temp)
-        st.markdown('<div class="fal-filter-status">' + nav_chip(f"Market Temp {temperature}", active=True) + '</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="fal-filter-status fal-filter-status-offset"><div class="fal-filter-status-card">'
+            '<span class="fal-filter-status-icon">&#10022;</span>'
+            '<div class="fal-filter-status-copy">'
+            '<div class="fal-filter-status-title">Market Temp</div>'
+            f'<div class="fal-filter-status-value">~ {html.escape(temperature)}</div>'
+            '</div></div></div>',
+            unsafe_allow_html=True,
+        )
     with filter_cols[3]:
-        st.markdown('<div class="fal-filter-status">' + nav_chip(f"Last Scan {scan_time}", dim=True) + '</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="fal-filter-status fal-filter-status-offset"><div class="fal-filter-status-card">'
+            '<span class="fal-filter-status-icon">&#128339;</span>'
+            '<div class="fal-filter-status-copy">'
+            '<div class="fal-filter-status-title">Last Scan</div>'
+            f'<div class="fal-filter-status-value">{html.escape(scan_time)}</div>'
+            '</div></div></div>',
+            unsafe_allow_html=True,
+        )
 
     filtered_tokens = tokens
     if signal_filter != "ALL":
