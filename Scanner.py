@@ -1640,6 +1640,34 @@ def main():
         print("Reasons:     " + (", ".join(token.get("reasons", [])) or "No strong signals"))
         print("DexScreener: " + (token.get("dexscreener_url") or "No link"))
 
+    surge_candidates = [
+        token
+        for token in tokens
+        if str(token.get("surge_level", "NONE") or "NONE").upper() in {"WATCH", "SURGE", "BREAKOUT"}
+    ]
+    level_rank = {"BREAKOUT": 3, "SURGE": 2, "WATCH": 1}
+    surge_candidates.sort(
+        key=lambda token: (
+            level_rank.get(str(token.get("surge_level", "NONE") or "NONE").upper(), 0),
+            int(token.get("surge_rating", 0) or 0),
+        ),
+        reverse=True,
+    )
+
+    print("\nSURGE CANDIDATES: " + str(len(surge_candidates)))
+    for token in surge_candidates:
+        level = str(token.get("surge_level", "NONE") or "NONE").upper()
+        symbol = str(token.get("token_symbol", "UNKNOWN") or "UNKNOWN")
+        market_cap = safe_number(token.get("market_cap_usd"))
+        mc_change = safe_number(token.get("surge_market_cap_change_pct"))
+        volume_accel = safe_number(token.get("surge_volume_acceleration"))
+        buy_pressure = safe_number(token.get("surge_buy_pressure_ratio"))
+        surge_rating = int(token.get("surge_rating", 0) or 0)
+        print(
+            f"{level} | {symbol} | ${market_cap:,.0f} | {mc_change:+.2f}% | "
+            f"{volume_accel:.2f}x | {buy_pressure:.2f}x | {surge_rating}/100"
+        )
+
 
 if __name__ == "__main__":
     main()
