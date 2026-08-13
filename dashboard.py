@@ -1336,6 +1336,34 @@ def _surge_field_key(name):
     return f"falcon_surge_{name}"
 
 
+def _surge_pending_values_key():
+    return "_falcon_surge_pending_values"
+
+
+def _surge_notice_key():
+    return "_falcon_surge_notice"
+
+
+def _stage_surge_form_values(settings, notice_message=""):
+    st.session_state[_surge_pending_values_key()] = dict(settings)
+    if notice_message:
+        st.session_state[_surge_notice_key()] = str(notice_message)
+
+
+def _consume_staged_surge_form_values():
+    pending = st.session_state.pop(_surge_pending_values_key(), None)
+    if not isinstance(pending, dict):
+        return
+    for key, value in pending.items():
+        st.session_state[_surge_field_key(key)] = value
+
+
+def _render_surge_notice():
+    message = st.session_state.pop(_surge_notice_key(), "")
+    if message:
+        st.success(str(message))
+
+
 def _initialize_surge_form_state(settings):
     for key, value in settings.items():
         state_key = _surge_field_key(key)
@@ -1411,11 +1439,13 @@ def _validate_surge_settings(settings):
 
 
 def render_surge_settings_panel():
+    _consume_staged_surge_form_values()
     active_settings = get_surge_settings()
     default_settings = get_default_surge_settings()
     _initialize_surge_form_state(active_settings)
 
     with st.expander("⚡ Surge Settings", expanded=False):
+        _render_surge_notice()
         st.caption("WATCH = interesting acceleration, monitor only")
         st.caption("SURGE = strong acceleration, Telegram alert")
         st.caption("BREAKOUT = exceptional acceleration, urgent Telegram alert")
@@ -1485,17 +1515,15 @@ def render_surge_settings_panel():
                     st.error(message)
             else:
                 applied = apply_surge_settings(pending)
-                for key, value in applied.items():
-                    st.session_state[_surge_field_key(key)] = value
-                st.success("Surge settings applied and saved locally.")
                 st.session_state.scan_payload = scan_tokens()
+                _stage_surge_form_values(applied, notice_message="Surge settings applied and saved locally.")
+                st.rerun()
 
         if reset_clicked:
             reset_values = reset_surge_settings()
-            for key, value in reset_values.items():
-                st.session_state[_surge_field_key(key)] = value
-            st.success("Surge settings reset to defaults.")
             st.session_state.scan_payload = scan_tokens()
+            _stage_surge_form_values(reset_values, notice_message="Surge settings reset to defaults.")
+            st.rerun()
 
 
 def display_falcon():
