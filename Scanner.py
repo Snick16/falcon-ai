@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 from falcon_alerts import create_default_alert_engine
+from falcon_surge import create_default_surge_engine, evaluate_surge
 from social_intelligence import SocialContext, create_default_social_engine
 from source_scanner import collect_all_candidates
 
@@ -19,6 +20,7 @@ SMART_WALLET_TRACKER_FILE = MEMORY_DIR / "smart_wallet_tracker.json"
 MAX_SNAPSHOTS = 500
 SOCIAL_ENGINE = create_default_social_engine()
 ALERT_ENGINE = create_default_alert_engine()
+SURGE_ENGINE = create_default_surge_engine()
 
 FALCON_SCORING_CONFIG = {
     "confirmation": {
@@ -1154,6 +1156,17 @@ def normalize_token_shape(token):
         if key not in normalized:
             raise KeyError(f"Missing required token key: {key}")
 
+    normalized["surge_level"] = str(normalized.get("surge_level", "NONE") or "NONE")
+    normalized["surge_rating"] = _clamp_int(normalized.get("surge_rating", 0), 0, 100)
+    normalized["surge_market_cap_change_pct"] = round(safe_number(normalized.get("surge_market_cap_change_pct")), 2)
+    normalized["surge_volume_acceleration"] = round(max(0.0, safe_number(normalized.get("surge_volume_acceleration"))), 3)
+    normalized["surge_buy_pressure_ratio"] = round(max(0.0, safe_number(normalized.get("surge_buy_pressure_ratio"))), 3)
+    normalized["surge_buy_pressure_positive"] = bool(normalized.get("surge_buy_pressure_positive", False))
+    surge_reasons = normalized.get("surge_reasons", [])
+    if not isinstance(surge_reasons, list):
+        surge_reasons = [str(surge_reasons)] if surge_reasons else []
+    normalized["surge_reasons"] = [str(reason) for reason in surge_reasons]
+
     return normalized
 
 
@@ -1193,6 +1206,7 @@ def scan_tokens(max_tokens=200, top_n=30):
 
         if not candidates:
             alert_report = ALERT_ENGINE.process_scan([], scanned_at)
+            surge_report = SURGE_ENGINE.process_scan([], scanned_at)
             record_disappeared_tokens(previous_tokens, [], scanned_at)
             save_snapshot(scanned_at, [])
             return {
@@ -1206,6 +1220,20 @@ def scan_tokens(max_tokens=200, top_n=30):
                 "scanner_elapsed_ms": scanner_elapsed_ms,
                 "tokens": [],
                 "alerts": alert_report.to_dict(),
+                "surge_alerts": surge_report.to_dict(),
+                "surge_config": {
+                    "enabled": SURGE_ENGINE.config.enabled,
+                    "min_market_cap_usd": SURGE_ENGINE.config.min_market_cap_usd,
+                    "max_market_cap_usd": SURGE_ENGINE.config.max_market_cap_usd,
+                    "min_liquidity_usd": SURGE_ENGINE.config.min_liquidity_usd,
+                    "breakout_min_liquidity_usd": SURGE_ENGINE.config.breakout_min_liquidity_usd,
+                    "watch_min_mc_change_pct": SURGE_ENGINE.config.watch_min_mc_change_pct,
+                    "surge_min_mc_change_pct": SURGE_ENGINE.config.surge_min_mc_change_pct,
+                    "breakout_min_mc_change_pct": SURGE_ENGINE.config.breakout_min_mc_change_pct,
+                    "surge_min_volume_accel": SURGE_ENGINE.config.surge_min_volume_accel,
+                    "breakout_min_volume_accel": SURGE_ENGINE.config.breakout_min_volume_accel,
+                    "breakout_min_buy_pressure_ratio": SURGE_ENGINE.config.breakout_min_buy_pressure_ratio,
+                },
             }
 
         opportunities = []
@@ -1427,6 +1455,20 @@ def scan_tokens(max_tokens=200, top_n=30):
                 "telegram_channels": list((candidate.get("raw_data") or {}).get("telegram_channels", [])),
                 "telegram_messages": list((candidate.get("raw_data") or {}).get("telegram_messages", [])),
             }
+            if SURGE_ENGINE.config.enabled:
+                surge = evaluate_surge(current_token, previous_token, SURGE_ENGINE.config)
+            else:
+                surge = {
+                    "surge_level": "NONE",
+                    "surge_reasons": [],
+                    "surge_candidate": False,
+                    "surge_market_cap_change_pct": 0.0,
+                    "surge_volume_acceleration": 0.0,
+                    "surge_buy_pressure_ratio": 0.0,
+                    "surge_buy_pressure_positive": False,
+                    "surge_rating": 0,
+                }
+            current_token.update(surge)
             current_token.update(build_memory_delta(current_token, previous_token))
 
             opportunities.append(
@@ -1451,6 +1493,7 @@ def scan_tokens(max_tokens=200, top_n=30):
             )
 
         alert_report = ALERT_ENGINE.process_scan(opportunities, scanned_at)
+        surge_report = SURGE_ENGINE.process_scan(opportunities, scanned_at)
         record_disappeared_tokens(previous_tokens, opportunities, scanned_at)
         save_snapshot(scanned_at, opportunities)
 
@@ -1466,6 +1509,20 @@ def scan_tokens(max_tokens=200, top_n=30):
             "candidates_rated": len(opportunities),
             "tokens": top_tokens,
             "alerts": alert_report.to_dict(),
+            "surge_alerts": surge_report.to_dict(),
+            "surge_config": {
+                "enabled": SURGE_ENGINE.config.enabled,
+                "min_market_cap_usd": SURGE_ENGINE.config.min_market_cap_usd,
+                "max_market_cap_usd": SURGE_ENGINE.config.max_market_cap_usd,
+                "min_liquidity_usd": SURGE_ENGINE.config.min_liquidity_usd,
+                "breakout_min_liquidity_usd": SURGE_ENGINE.config.breakout_min_liquidity_usd,
+                "watch_min_mc_change_pct": SURGE_ENGINE.config.watch_min_mc_change_pct,
+                "surge_min_mc_change_pct": SURGE_ENGINE.config.surge_min_mc_change_pct,
+                "breakout_min_mc_change_pct": SURGE_ENGINE.config.breakout_min_mc_change_pct,
+                "surge_min_volume_accel": SURGE_ENGINE.config.surge_min_volume_accel,
+                "breakout_min_volume_accel": SURGE_ENGINE.config.breakout_min_volume_accel,
+                "breakout_min_buy_pressure_ratio": SURGE_ENGINE.config.breakout_min_buy_pressure_ratio,
+            },
         }
 
     except requests.RequestException as error:
@@ -1490,6 +1547,16 @@ def scan_tokens(max_tokens=200, top_n=30):
                 "errors": 1,
                 "mode": "error",
             },
+            "surge_alerts": {
+                "enabled": SURGE_ENGINE.config.alerts_enabled,
+                "dry_run": SURGE_ENGINE.config.alert_dry_run,
+                "evaluated": 0,
+                "qualified": 0,
+                "sent": 0,
+                "suppressed_duplicate": 0,
+                "suppressed_cooldown": 0,
+                "errors": 1,
+            },
         }
     except Exception as error:
         return {
@@ -1512,6 +1579,16 @@ def scan_tokens(max_tokens=200, top_n=30):
                 "suppressed_by_contract": 0,
                 "errors": 1,
                 "mode": "error",
+            },
+            "surge_alerts": {
+                "enabled": SURGE_ENGINE.config.alerts_enabled,
+                "dry_run": SURGE_ENGINE.config.alert_dry_run,
+                "evaluated": 0,
+                "qualified": 0,
+                "sent": 0,
+                "suppressed_duplicate": 0,
+                "suppressed_cooldown": 0,
+                "errors": 1,
             },
         }
 

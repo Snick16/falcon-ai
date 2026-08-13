@@ -2,6 +2,18 @@
 
 Falcon AI Hunter scans Solana token opportunities, rates each candidate with the existing Falcon scoring logic, and renders ranked results in the Streamlit dashboard.
 
+## Falcon Surge Detection
+
+Falcon Surge is an additive subsystem that tracks scan-over-scan acceleration and classifies each token as:
+
+- WATCH: market cap acceleration at or above the WATCH threshold with positive buy pressure
+- SURGE: stronger market-cap acceleration plus clear volume acceleration and buys greater than sells
+- BREAKOUT: highest acceleration tier with stronger volume acceleration, stronger buy pressure, and a higher liquidity floor
+
+Surge detection does not require Smart Money, KOL, Telegram, or X confirmation to alert. Confirmations raise confidence when available but do not block surge signals.
+
+Telegram sends dedicated alerts when a token first reaches SURGE or BREAKOUT. Duplicate alerts at the same level are suppressed, while level progression (SURGE to BREAKOUT) is allowed.
+
 ## Supported Discovery Sources
 
 - dexscreener_latest: public DexScreener latest boosts endpoint
@@ -52,6 +64,27 @@ Alert-engine controls:
 - FALCON_ALERT_MIN_BUYS_5M
 - FALCON_ALERT_MAX_RISK_RANK
 - FALCON_ALERT_ALLOWED_MOMENTUM
+
+Surge detector controls:
+
+- FALCON_SURGE_ENABLED
+- FALCON_SURGE_MIN_MC_USD
+- FALCON_SURGE_MAX_MC_USD
+- FALCON_SURGE_MIN_LIQ_USD
+- FALCON_SURGE_BREAKOUT_MIN_LIQ_USD
+- FALCON_SURGE_WATCH_MC_CHANGE_PCT
+- FALCON_SURGE_SURGE_MC_CHANGE_PCT
+- FALCON_SURGE_BREAKOUT_MC_CHANGE_PCT
+- FALCON_SURGE_MIN_VOLUME_ACCEL
+- FALCON_SURGE_BREAKOUT_MIN_VOLUME_ACCEL
+- FALCON_SURGE_BREAKOUT_MIN_BUY_PRESSURE
+- FALCON_SURGE_FOCUS_NEAR_500K
+- FALCON_SURGE_FOCUS_500K
+- FALCON_SURGE_FOCUS_1M
+- FALCON_SURGE_ALERTS_ENABLED
+- FALCON_SURGE_ALERT_DRY_RUN
+- FALCON_SURGE_ALERT_COOLDOWN_MINUTES
+- FALCON_SURGE_ALERT_RESET_MINUTES
 
 ## Which Scanners Work Without Credentials
 

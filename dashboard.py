@@ -648,6 +648,60 @@ def inject_css():
         .move-neg { color: var(--bad); font-weight: 800; }
         .move-flat { color: #cfe3d4; }
 
+        .surge-wrap {
+            border: 1px solid var(--border-soft);
+            border-radius: 10px;
+            background: #000000;
+            margin-top: 7px;
+            overflow: auto;
+        }
+
+        .surge-title {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 4px 8px;
+            border-bottom: 1px solid var(--border-soft);
+            color: #beffd7;
+            font-size: 0.62rem;
+            text-transform: uppercase;
+            letter-spacing: 0.07em;
+            font-weight: 800;
+        }
+
+        .surge-title .right {
+            text-transform: none;
+            letter-spacing: 0;
+            color: #95cfaa;
+            font-size: 0.62rem;
+            font-weight: 700;
+        }
+
+        table.surge-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.74rem;
+        }
+
+        .surge-table th,
+        .surge-table td {
+            border-bottom: 1px solid rgba(42, 255, 132, 0.14);
+            padding: 5px 8px;
+            text-align: left;
+        }
+
+        .surge-table th {
+            color: #beffd7;
+            font-size: 0.67rem;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            background: #000000;
+        }
+
+        .surge-watch { color: #d7d76e; font-weight: 800; }
+        .surge-surge { color: #9cffb4; font-weight: 900; }
+        .surge-breakout { color: #ffb067; font-weight: 900; }
+
         .row-buy-now td { background: rgba(16, 16, 16, 0.92); }
         .row-buy-now td:first-child { box-shadow: inset 3px 0 0 var(--ok); }
         .row-pass-subdued td { opacity: 0.5; }
@@ -903,6 +957,68 @@ def move_class(value):
     if val < 0:
         return "move-neg"
     return "move-flat"
+
+
+def surge_level_class(level):
+    value = str(level or "NONE").upper()
+    if value == "BREAKOUT":
+        return "surge-breakout"
+    if value == "SURGE":
+        return "surge-surge"
+    if value == "WATCH":
+        return "surge-watch"
+    return ""
+
+
+def render_surge_section(tokens):
+    candidates = [
+        token
+        for token in tokens
+        if str(token.get("surge_level", "NONE")).upper() in {"WATCH", "SURGE", "BREAKOUT"}
+    ]
+    if not candidates:
+        return
+
+    rank = {"BREAKOUT": 3, "SURGE": 2, "WATCH": 1}
+    candidates = sorted(
+        candidates,
+        key=lambda token: (
+            rank.get(str(token.get("surge_level", "NONE")).upper(), 0),
+            to_int(token.get("surge_rating", 0)),
+            float(token.get("surge_market_cap_change_pct", 0) or 0),
+        ),
+        reverse=True,
+    )[:8]
+
+    rows = []
+    for token in candidates:
+        symbol = html.escape(str(token.get("token_symbol", "UNKNOWN") or "UNKNOWN"))
+        market_cap = fmt_money(token.get("market_cap_usd", 0))
+        mc_accel = float(token.get("surge_market_cap_change_pct", 0) or 0)
+        vol_accel = float(token.get("surge_volume_acceleration", 0) or 0)
+        buy_pressure = float(token.get("surge_buy_pressure_ratio", 0) or 0)
+        level = str(token.get("surge_level", "NONE") or "NONE").upper()
+        rating = to_int(token.get("surge_rating", 0))
+        rows.append(
+            "<tr>"
+            f"<td>{symbol}</td>"
+            f"<td>{market_cap}</td>"
+            f"<td class='{move_class(mc_accel)}'>{mc_accel:+.2f}%</td>"
+            f"<td>{vol_accel:.2f}x</td>"
+            f"<td>{buy_pressure:.2f}x</td>"
+            f"<td class='{surge_level_class(level)}'>{html.escape(level)}</td>"
+            f"<td>{rating}/100</td>"
+            "</tr>"
+        )
+
+    surge_html = (
+        '<div class="surge-wrap">'
+        '<div class="surge-title"><span>Surge Candidates</span><span class="right">WATCH · SURGE · BREAKOUT</span></div>'
+        '<table class="surge-table">'
+        '<thead><tr><th>Symbol</th><th>MC</th><th>MC Accel</th><th>Vol Accel</th><th>Buy Pressure</th><th>Level</th><th>Rating</th></tr></thead>'
+        '<tbody>' + "".join(rows) + '</tbody></table></div>'
+    )
+    st.markdown(surge_html, unsafe_allow_html=True)
 
 
 def chart_link_href(token):
@@ -1349,6 +1465,8 @@ def display_falcon():
     </div>
     """
     st.markdown(summary_html, unsafe_allow_html=True)
+
+    render_surge_section(filtered_tokens)
 
     render_scanner_status(payload.get("scanner_status", []), payload.get("scanner_elapsed_ms", 0))
 
